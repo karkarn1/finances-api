@@ -161,6 +161,86 @@ def fetch_price_range(
         raise APIError(f"Failed to fetch price range: {str(e)}") from e
 
 
+def fetch_batch_historical_prices(
+    symbols: list[str],
+    period: str = "max",
+    interval: str = "1d",
+) -> dict[str, pd.DataFrame]:
+    """
+    Fetch historical price data for multiple symbols at once (batch download).
+
+    This is significantly faster than individual requests as it uses yfinance's
+    multi-ticker download with threading.
+
+    Args:
+        symbols: List of stock symbols (e.g., ["AAPL", "MSFT", "GOOGL"])
+        period: Time period (e.g., "1d", "1mo", "1y", "max")
+        interval: Data interval (e.g., "1m", "1h", "1d", "1wk")
+
+    Returns:
+        Dictionary mapping symbol to its DataFrame
+        - For successful downloads: DataFrame with Open, High, Low, Close, Volume
+        - For failed downloads: Empty DataFrame or None
+
+    Raises:
+        APIError: If batch download fails completely
+
+    Note:
+        - Uses threading for parallel downloads (much faster)
+        - Handles missing/invalid symbols gracefully (returns empty DataFrame)
+        - Progress bar disabled for cleaner logs
+        - Single ticker is handled differently by yfinance (returns simple DataFrame)
+
+    Example:
+        >>> data = fetch_batch_historical_prices(["AAPL", "MSFT"], period="1y")
+        >>> aapl_df = data.get("AAPL")
+        >>> if aapl_df is not None and not aapl_df.empty:
+        ...     # Process AAPL data
+    """
+    try:
+        symbols_upper = [s.upper() for s in symbols]
+
+        # Use yfinance's batch download with threading
+        data = yf.download(
+            tickers=symbols_upper,
+            period=period,
+            interval=interval,
+            group_by="ticker",  # Group by ticker for multi-ticker downloads
+            threads=True,  # Use multithreading
+            progress=False,  # Disable progress bar for cleaner logs
+        )
+
+        # Handle single ticker case (yfinance returns simple DataFrame)
+        if len(symbols_upper) == 1:
+            symbol = symbols_upper[0]
+            if data.empty:
+                logger.warning(f"No data returned for {symbol}")
+                return {symbol: pd.DataFrame()}
+            return {symbol: data}
+
+        # Handle multi-ticker case (yfinance returns nested structure)
+        result: dict[str, pd.DataFrame] = {}
+        for symbol in symbols_upper:
+            try:
+                # Access ticker data from grouped structure
+                ticker_data = data[symbol] if symbol in data.columns.levels[0] else None
+
+                if ticker_data is None or ticker_data.empty:
+                    logger.warning(f"No data available for {symbol}")
+                    result[symbol] = pd.DataFrame()
+                else:
+                    result[symbol] = ticker_data
+            except (KeyError, AttributeError) as e:
+                logger.warning(f"Could not extract data for {symbol}: {e}")
+                result[symbol] = pd.DataFrame()
+
+        return result
+
+    except Exception as e:
+        logger.error(f"Error in batch download for {len(symbols)} symbols: {e}")
+        raise APIError(f"Batch download failed: {str(e)}") from e
+
+
 def parse_yfinance_data(
     df: pd.DataFrame, security_id: uuid.UUID, interval_type: str
 ) -> list[SecurityPrice]:

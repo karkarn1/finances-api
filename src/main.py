@@ -9,6 +9,7 @@ from app.api.routes import (
     account_values,
     accounts,
     auth,
+    currencies,
     financial_institutions,
     health,
     holdings,
@@ -57,6 +58,7 @@ app.include_router(health.router, tags=["health"])
 app.include_router(auth.router, prefix="/api/v1/auth", tags=["auth"])
 app.include_router(users.router, prefix="/api/v1/users", tags=["users"])
 app.include_router(securities.router, prefix="/api/v1/securities", tags=["securities"])
+app.include_router(currencies.router, prefix="/api/v1/currencies", tags=["currencies"])
 app.include_router(
     financial_institutions.router,
     prefix="/api/v1/financial-institutions",

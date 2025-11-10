@@ -21,6 +21,19 @@ from app.schemas.auth import (
     UserLogin,
     UserRegister,
 )
+from app.schemas.currency import (
+    CurrencyBase,
+    CurrencyCreate,
+    CurrencyResponse,
+    CurrencyUpdate,
+)
+from app.schemas.currency_rate import (
+    CurrencyRateBase,
+    CurrencyRateCreate,
+    CurrencyRateResponse,
+    CurrencyRatesResponse,
+    SyncRatesResponse,
+)
 from app.schemas.financial_institution import (
     FinancialInstitutionBase,
     FinancialInstitutionCreate,
@@ -49,6 +62,17 @@ __all__ = [
     "UserCreate",
     "UserResponse",
     "UserUpdate",
+    # Currency schemas
+    "CurrencyBase",
+    "CurrencyCreate",
+    "CurrencyResponse",
+    "CurrencyUpdate",
+    # Currency rate schemas
+    "CurrencyRateBase",
+    "CurrencyRateCreate",
+    "CurrencyRateResponse",
+    "CurrencyRatesResponse",
+    "SyncRatesResponse",
     # Financial institution schemas
     "FinancialInstitutionBase",
     "FinancialInstitutionCreate",

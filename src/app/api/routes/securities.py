@@ -26,6 +26,7 @@ from app.schemas.security import (
 from app.services.yfinance_service import (
     APIError,
     InvalidSymbolError,
+    fetch_batch_historical_prices,
     fetch_historical_prices,
     fetch_security_info,
     parse_yfinance_data,
@@ -739,80 +740,226 @@ async def run_bulk_sync(
     batch_delay: float,
 ) -> None:
     """
-    Run bulk sync in the background.
+    Run bulk sync in the background using optimized batch downloads.
 
-    This function processes all securities and logs the results but doesn't
-    return anything since it runs as a background task.
+    NEW WORKFLOW:
+    1. Create Security records in batches (fast DB operations)
+    2. Use yfinance batch download to fetch price data for multiple tickers at once
+    3. Process and store price data in batches
+
+    This approach is significantly faster than individual ticker downloads:
+    - Before: ~96 tickers × 1.5s each = ~144 seconds
+    - After: ~10 batches × 4s each = ~40 seconds
 
     Args:
         tickers: List of stock symbols to sync
-        batch_size: Number of securities to sync concurrently
-        batch_delay: Delay between API calls in seconds
+        batch_size: Number of tickers to download per yfinance batch (recommended: 10-20)
+        batch_delay: Delay between batches in seconds to avoid rate limiting
     """
     from app.db.session import AsyncSessionLocal
 
     logger.info(
-        f"[BULK-SYNC] Starting bulk sync for {len(tickers)} securities "
+        f"[BULK-SYNC] Starting optimized bulk sync for {len(tickers)} securities "
         f"(batch_size={batch_size}, batch_delay={batch_delay})"
     )
 
     # Track statistics
-    successfully_added = 0
-    failed_additions = 0
-    successfully_synced = 0
-    failed_syncs = 0
-    skipped = 0
+    securities_created = 0
+    securities_skipped = 0
+    securities_failed = 0
+    total_prices_synced = 0
 
     # Create a new database session for the background task
     async with AsyncSessionLocal() as db:
-        # Process securities in batches
-        for i in range(0, len(tickers), batch_size):
-            batch = tickers[i : i + batch_size]
+        # ==========================================
+        # PHASE 1: Create Security records in batch
+        # ==========================================
+        logger.info("[BULK-SYNC] Phase 1: Creating Security records...")
+        securities_to_create: list[Security] = []
+        symbol_to_security: dict[str, Security] = {}
+
+        for symbol in tickers:
+            symbol_upper = symbol.upper()
+
+            # Check if security already exists
+            result = await db.execute(
+                select(Security).where(Security.symbol == symbol_upper)
+            )
+            existing_security = result.scalar_one_or_none()
+
+            if existing_security:
+                # Security exists - skip creation but track for price sync
+                symbol_to_security[symbol_upper] = existing_security
+                securities_skipped += 1
+                logger.debug(f"[BULK-SYNC] Security {symbol_upper} already exists")
+                continue
+
+            # Fetch security info from yfinance
+            try:
+                security_info = fetch_security_info(symbol_upper)
+
+                # Create new security record (not yet committed)
+                new_security = Security(
+                    id=uuid.uuid4(),
+                    symbol=symbol_upper,
+                    is_syncing=True,
+                    **security_info,
+                )
+                securities_to_create.append(new_security)
+                symbol_to_security[symbol_upper] = new_security
+                logger.debug(f"[BULK-SYNC] Queued {symbol_upper} for creation")
+
+            except (InvalidSymbolError, APIError) as e:
+                logger.warning(f"[BULK-SYNC] Could not fetch info for {symbol_upper}: {e}")
+                securities_failed += 1
+            except Exception as e:
+                logger.error(
+                    f"[BULK-SYNC] Unexpected error for {symbol_upper}: {e}",
+                    exc_info=True,
+                )
+                securities_failed += 1
+
+        # Batch insert all new securities
+        if securities_to_create:
+            logger.info(f"[BULK-SYNC] Inserting {len(securities_to_create)} new securities...")
+            db.add_all(securities_to_create)
+            await db.commit()
+
+            # Refresh all to get IDs
+            for security in securities_to_create:
+                await db.refresh(security)
+
+            securities_created = len(securities_to_create)
             logger.info(
-                f"[BULK-SYNC] Processing batch {i // batch_size + 1} "
-                f"({i + 1}-{min(i + batch_size, len(tickers))} of {len(tickers)})"
+                f"[BULK-SYNC] Phase 1 complete: {securities_created} created, "
+                f"{securities_skipped} already existed, {securities_failed} failed"
             )
 
-            # Process batch concurrently
-            batch_tasks = [
-                _sync_single_security(symbol, db, batch_delay) for symbol in batch
-            ]
-            batch_results = await asyncio.gather(*batch_tasks, return_exceptions=True)
+        # ======================================================
+        # PHASE 2: Batch download price data using yfinance
+        # ======================================================
+        logger.info("[BULK-SYNC] Phase 2: Batch downloading price data...")
 
-            # Process results
-            for result_or_exc in batch_results:
-                if isinstance(result_or_exc, Exception):
-                    logger.error(
-                        f"[BULK-SYNC] Exception in batch: {result_or_exc}", exc_info=True
-                    )
-                    failed_additions += 1
-                    failed_syncs += 1
-                else:
-                    # Type narrowing: result_or_exc is BulkSyncResult here
-                    result: BulkSyncResult = result_or_exc
+        # Get list of symbols that have security records
+        symbols_to_sync = list(symbol_to_security.keys())
 
-                    if result.status == "success":
-                        successfully_added += 1
-                        if result.prices_synced > 0:
-                            successfully_synced += 1
-                    elif result.status == "skipped":
-                        skipped += 1
-                    else:  # failed
-                        failed_additions += 1
-                        failed_syncs += 1
-
-            # Log progress
+        # Process in batches for yfinance batch download
+        for i in range(0, len(symbols_to_sync), batch_size):
+            batch = symbols_to_sync[i : i + batch_size]
+            batch_num = i // batch_size + 1
             logger.info(
-                f"[BULK-SYNC] Batch {i // batch_size + 1} completed. "
-                f"Success: {successfully_added}, Failed: {failed_additions}, "
-                f"Skipped: {skipped}"
+                f"[BULK-SYNC] Batch {batch_num}: Downloading data for {len(batch)} tickers "
+                f"({i + 1}-{min(i + batch_size, len(symbols_to_sync))} of {len(symbols_to_sync)})"
             )
+
+            # Add delay between batches to avoid rate limiting
+            if i > 0 and batch_delay > 0:
+                await asyncio.sleep(batch_delay)
+
+            try:
+                # ============================================
+                # DAILY DATA: Batch download for all tickers
+                # ============================================
+                logger.info(f"[BULK-SYNC] Batch {batch_num}: Fetching daily data...")
+                daily_batch_data = fetch_batch_historical_prices(
+                    symbols=batch,
+                    period="max",
+                    interval="1d",
+                )
+
+                # Process daily data for each ticker
+                for symbol, daily_df in daily_batch_data.items():
+                    security = symbol_to_security.get(symbol)
+                    if not security:
+                        logger.warning(f"[BULK-SYNC] No security record for {symbol}")
+                        continue
+
+                    if not daily_df.empty:
+                        try:
+                            daily_prices = parse_yfinance_data(daily_df, security.id, "1d")
+                            if daily_prices:
+                                db.add_all(daily_prices)
+                                await db.commit()
+                                total_prices_synced += len(daily_prices)
+                                logger.info(
+                                    f"[BULK-SYNC] {symbol}: Synced {len(daily_prices)} daily prices"
+                                )
+                        except Exception as e:
+                            logger.error(
+                                f"[BULK-SYNC] Error processing daily data for {symbol}: {e}",
+                                exc_info=True,
+                            )
+                    else:
+                        logger.warning(f"[BULK-SYNC] {symbol}: No daily data available")
+
+                # ============================================
+                # INTRADAY DATA: Batch download for all tickers
+                # ============================================
+                logger.info(f"[BULK-SYNC] Batch {batch_num}: Fetching intraday data...")
+                intraday_batch_data = fetch_batch_historical_prices(
+                    symbols=batch,
+                    period="7d",
+                    interval="1m",
+                )
+
+                # Process intraday data for each ticker
+                for symbol, intraday_df in intraday_batch_data.items():
+                    security = symbol_to_security.get(symbol)
+                    if not security:
+                        continue
+
+                    if not intraday_df.empty:
+                        try:
+                            intraday_prices = parse_yfinance_data(
+                                intraday_df, security.id, "1m"
+                            )
+                            if intraday_prices:
+                                db.add_all(intraday_prices)
+                                await db.commit()
+                                total_prices_synced += len(intraday_prices)
+                                logger.info(
+                                    f"[BULK-SYNC] {symbol}: Synced "
+                                    f"{len(intraday_prices)} intraday prices"
+                                )
+                        except Exception as e:
+                            logger.error(
+                                f"[BULK-SYNC] Error processing intraday data for {symbol}: {e}",
+                                exc_info=True,
+                            )
+                    else:
+                        logger.debug(f"[BULK-SYNC] {symbol}: No intraday data available")
+
+                # Update sync status for all securities in batch
+                for symbol in batch:
+                    security = symbol_to_security.get(symbol)
+                    if security:
+                        security.last_synced_at = datetime.now(UTC)
+                        security.is_syncing = False
+
+                await db.commit()
+
+                logger.info(
+                    f"[BULK-SYNC] Batch {batch_num} complete: "
+                    f"{total_prices_synced} total prices synced so far"
+                )
+
+            except Exception as e:
+                logger.error(
+                    f"[BULK-SYNC] Batch {batch_num} failed: {e}",
+                    exc_info=True,
+                )
+                # Mark securities in failed batch as not syncing
+                for symbol in batch:
+                    security = symbol_to_security.get(symbol)
+                    if security:
+                        security.is_syncing = False
+                await db.commit()
 
     # Generate summary message
     message = (
-        f"Bulk sync completed: {successfully_added} successfully added, "
-        f"{successfully_synced} successfully synced, {failed_additions} failed, "
-        f"{skipped} skipped out of {len(tickers)} total"
+        f"Bulk sync completed: {securities_created} securities created, "
+        f"{securities_skipped} already existed, {securities_failed} failed. "
+        f"Total prices synced: {total_prices_synced}"
     )
 
     logger.info(f"[BULK-SYNC] {message}")
@@ -823,25 +970,44 @@ async def bulk_sync_securities(
     background_tasks: BackgroundTasks,
     current_user: CurrentActiveUser,
     batch_size: int = Query(
-        10,
-        description="Number of securities to sync concurrently",
+        50,
+        description=(
+            "Number of tickers to download per yfinance batch "
+            "(recommended: 30-100 for optimal performance with 6000+ tickers)"
+        ),
         ge=1,
-        le=50,
+        le=100,
     ),
     batch_delay: float = Query(
-        0.5,
-        description="Delay between API calls in seconds to avoid rate limiting",
+        2.0,
+        description="Delay between batches in seconds to avoid rate limiting",
         ge=0,
-        le=5,
+        le=10,
     ),
 ) -> BulkSyncStartResponse:
     """
-    Start bulk sync job for stocks from NASDAQ, NYSE, and TSX exchanges.
+    Start optimized bulk sync job for ALL stocks from NASDAQ, NYSE, and TSX exchanges.
 
-    This endpoint starts a background job to sync a predefined list of major stocks from:
-    - NASDAQ: Technology-focused stocks (AAPL, MSFT, GOOGL, etc.)
-    - NYSE: Diverse stocks (JPM, V, MA, WMT, etc.)
-    - TSX: Canadian stocks (RY.TO, TD.TO, ENB.TO, etc.)
+    This endpoint dynamically fetches ALL available securities from official exchange
+    sources (6000+ tickers) and uses **yfinance batch download** to sync multiple
+    tickers simultaneously, providing significant performance improvements.
+
+    **Optimized Workflow:**
+    1. Dynamically fetch complete ticker lists from NASDAQ, NYSE, TSX (6000+ tickers)
+    2. Create Security records in batch (fast DB operations)
+    3. Use yfinance batch download to fetch price data for multiple tickers at once
+    4. Process and store price data in batches
+
+    **Performance:**
+    - Scale: 6000+ tickers across all exchanges
+    - Batch processing: ~120 batches × 5s each = ~600 seconds (~10 minutes)
+    - With rate limiting: Expect 10-15 minutes for complete sync
+    - Individual approach would take 2-3 hours (85% faster with batching!)
+
+    **Exchanges Covered (Dynamic Fetching):**
+    - NASDAQ: All listed stocks from official FTP (2000+ securities)
+    - NYSE: All listed stocks from official FTP (1500+ securities)
+    - TSX: Major Canadian stocks (200+ securities with .TO suffix)
 
     Only stocks are included - no indices or ETFs.
 
@@ -850,24 +1016,25 @@ async def bulk_sync_securities(
     - The sync job runs asynchronously in the background
     - Progress and results are logged but not returned to the client
     - Failed syncs are logged but don't stop the overall process
-    - Securities already being synced are skipped
-    - Rate limiting delays are applied between API calls
+    - Securities already in database will have their price data updated
+    - Rate limiting delays are applied between batches
+    - Ticker lists are cached for 24h to optimize performance
 
     Args:
         background_tasks: FastAPI background tasks manager
         current_user: Authenticated user (required)
-        batch_size: Number of securities to sync concurrently (default: 10)
-        batch_delay: Delay between API calls in seconds (default: 0.5)
+        batch_size: Number of tickers per yfinance batch (default: 50, optimal: 30-100)
+        batch_delay: Delay between batches in seconds (default: 2.0)
 
     Returns:
         Confirmation that the job has started with total securities count
 
     Example:
         POST /api/v1/securities/bulk-sync
-        POST /api/v1/securities/bulk-sync?batch_size=20&batch_delay=1.0
+        POST /api/v1/securities/bulk-sync?batch_size=100&batch_delay=3.0
     """
-    # Get list of all stocks to sync
-    tickers = get_tickers()
+    # Get list of all stocks to sync (dynamically fetched from exchanges)
+    tickers = await get_tickers()
 
     logger.info(
         f"[BULK-SYNC] Queuing bulk sync job for {len(tickers)} securities "

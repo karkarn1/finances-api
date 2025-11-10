@@ -53,6 +53,9 @@ class Account(Base, TimestampMixin):
     financial_institution_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("financial_institutions.id", ondelete="SET NULL"), nullable=True
     )
+    currency_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("currencies.id", ondelete="SET NULL"), nullable=True
+    )
     name: Mapped[str] = mapped_column(String(255))
     account_type: Mapped[AccountType] = mapped_column(Enum(AccountType))
     is_investment_account: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -64,6 +67,7 @@ class Account(Base, TimestampMixin):
     financial_institution: Mapped["FinancialInstitution"] = relationship(
         "FinancialInstitution", back_populates="accounts"
     )
+    currency: Mapped["Currency"] = relationship("Currency")
     account_values: Mapped[list["AccountValue"]] = relationship(
         "AccountValue", back_populates="account", cascade="all, delete-orphan"
     )

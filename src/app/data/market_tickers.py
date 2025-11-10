@@ -1,149 +1,54 @@
-"""Predefined lists of market tickers for bulk synchronization.
+"""Dynamic market ticker fetching for bulk synchronization.
 
-This module contains curated lists of major stock securities from NASDAQ,
-NYSE, and TSX exchanges that are used for bulk sync operations.
+This module provides dynamic fetching of ALL securities from NASDAQ, NYSE, and TSX
+exchanges (6000+ tickers), replacing the previous hardcoded 96-ticker list.
+
+Tickers are fetched from official exchange sources:
+- NASDAQ: Official FTP server (2000+ stocks)
+- NYSE: Official FTP server (1500+ stocks)
+- TSX: Curated list of major securities (200+ stocks)
+
+Data is cached for 24 hours to minimize API calls.
 """
 
-# NASDAQ stocks (Technology-heavy exchange)
-NASDAQ_STOCKS = [
-    # Technology
-    "AAPL",  # Apple Inc.
-    "MSFT",  # Microsoft Corporation
-    "GOOGL",  # Alphabet Inc. Class A
-    "GOOG",  # Alphabet Inc. Class C
-    "AMZN",  # Amazon.com Inc.
-    "NVDA",  # NVIDIA Corporation
-    "META",  # Meta Platforms Inc.
-    "TSLA",  # Tesla Inc.
-    "AVGO",  # Broadcom Inc.
-    "ORCL",  # Oracle Corporation
-    "CSCO",  # Cisco Systems Inc.
-    "ADBE",  # Adobe Inc.
-    "CRM",  # Salesforce Inc.
-    "INTC",  # Intel Corporation
-    "AMD",  # Advanced Micro Devices Inc.
-    "QCOM",  # QUALCOMM Incorporated
-    "TXN",  # Texas Instruments Incorporated
-    "IBM",  # International Business Machines
-    "NFLX",  # Netflix Inc.
-    # Consumer
-    "COST",  # Costco Wholesale Corporation
-    "SBUX",  # Starbucks Corporation
-    # Telecom
-    "TMUS",  # T-Mobile US Inc.
-]
-
-# NYSE stocks (Diverse exchange)
-NYSE_STOCKS = [
-    # Financial
-    "BRK-B",  # Berkshire Hathaway Inc. Class B
-    "JPM",  # JPMorgan Chase & Co.
-    "V",  # Visa Inc.
-    "MA",  # Mastercard Incorporated
-    "BAC",  # Bank of America Corporation
-    "WFC",  # Wells Fargo & Company
-    "GS",  # The Goldman Sachs Group Inc.
-    "MS",  # Morgan Stanley
-    "AXP",  # American Express Company
-    "BLK",  # BlackRock Inc.
-    "C",  # Citigroup Inc.
-    "SCHW",  # The Charles Schwab Corporation
-    # Healthcare
-    "UNH",  # UnitedHealth Group Incorporated
-    "JNJ",  # Johnson & Johnson
-    "LLY",  # Eli Lilly and Company
-    "PFE",  # Pfizer Inc.
-    "ABBV",  # AbbVie Inc.
-    "TMO",  # Thermo Fisher Scientific Inc.
-    "MRK",  # Merck & Co. Inc.
-    "ABT",  # Abbott Laboratories
-    "DHR",  # Danaher Corporation
-    "BMY",  # Bristol-Myers Squibb Company
-    "AMGN",  # Amgen Inc.
-    "CVS",  # CVS Health Corporation
-    # Consumer
-    "WMT",  # Walmart Inc.
-    "HD",  # The Home Depot Inc.
-    "PG",  # The Procter & Gamble Company
-    "KO",  # The Coca-Cola Company
-    "PEP",  # PepsiCo Inc.
-    "MCD",  # McDonald's Corporation
-    "NKE",  # NIKE Inc.
-    "DIS",  # The Walt Disney Company
-    # Energy
-    "XOM",  # Exxon Mobil Corporation
-    "CVX",  # Chevron Corporation
-    "COP",  # ConocoPhillips
-    "SLB",  # Schlumberger Limited
-    # Industrial
-    "BA",  # The Boeing Company
-    "CAT",  # Caterpillar Inc.
-    "GE",  # General Electric Company
-    "HON",  # Honeywell International Inc.
-    "UPS",  # United Parcel Service Inc.
-    "LMT",  # Lockheed Martin Corporation
-    "RTX",  # Raytheon Technologies Corporation
-    # Telecom
-    "T",  # AT&T Inc.
-    "VZ",  # Verizon Communications Inc.
-]
-
-# TSX stocks (Toronto Stock Exchange)
-TSX_STOCKS = [
-    # Financial
-    "RY.TO",  # Royal Bank of Canada
-    "TD.TO",  # The Toronto-Dominion Bank
-    "BNS.TO",  # The Bank of Nova Scotia
-    "BMO.TO",  # Bank of Montreal
-    "CM.TO",  # Canadian Imperial Bank of Commerce
-    "MFC.TO",  # Manulife Financial Corporation
-    "SLF.TO",  # Sun Life Financial Inc.
-    "GWO.TO",  # Great-West Lifeco Inc.
-    # Energy
-    "CNQ.TO",  # Canadian Natural Resources Limited
-    "SU.TO",  # Suncor Energy Inc.
-    "ENB.TO",  # Enbridge Inc.
-    "TRP.TO",  # TC Energy Corporation
-    "IMO.TO",  # Imperial Oil Limited
-    "CVE.TO",  # Cenovus Energy Inc.
-    # Telecom
-    "BCE.TO",  # BCE Inc.
-    "T.TO",  # TELUS Corporation
-    "RCI-B.TO",  # Rogers Communications Inc.
-    # Materials
-    "ABX.TO",  # Barrick Gold Corporation
-    "NTR.TO",  # Nutrien Ltd.
-    "FM.TO",  # First Quantum Minerals Ltd.
-    # Industrials
-    "CNR.TO",  # Canadian National Railway Company
-    "CP.TO",  # Canadian Pacific Kansas City Limited
-    "WCN.TO",  # Waste Connections Inc.
-    # Consumer
-    "L.TO",  # Loblaw Companies Limited
-    "ATD.TO",  # Alimentation Couche-Tard Inc.
-    "QSR.TO",  # Restaurant Brands International Inc.
-    # Technology
-    "SHOP.TO",  # Shopify Inc.
-    # Utilities
-    "FTS.TO",  # Fortis Inc.
-    "EMA.TO",  # Emera Incorporated
-]
-
-# Combined list of all stocks from NASDAQ, NYSE, and TSX
-ALL_STOCKS = NASDAQ_STOCKS + NYSE_STOCKS + TSX_STOCKS
+from app.services.exchange_service import fetch_all_exchange_tickers
 
 
-def get_tickers() -> list[str]:
-    """
-    Get list of all stock tickers from NASDAQ, NYSE, and TSX exchanges.
+async def get_tickers() -> list[str]:
+    """Get all ticker symbols from NASDAQ, NYSE, and TSX exchanges.
+
+    Fetches 6000+ securities dynamically from official exchange sources.
+    Results are cached for 24 hours to optimize performance.
 
     Returns only stocks - no indices or ETFs.
 
     Returns:
-        List of ticker symbols
+        List of ticker symbols from all exchanges (NASDAQ, NYSE, TSX)
 
     Example:
-        >>> get_tickers()
-        ['AAPL', 'MSFT', 'GOOGL', ..., 'RY.TO', 'TD.TO', ...]
+        >>> tickers = await get_tickers()
+        >>> print(len(tickers))
+        6234
+        >>> print(tickers[:5])
+        ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'NVDA']
+        >>> # TSX symbols have .TO suffix
+        >>> tsx_tickers = [t for t in tickers if t.endswith('.TO')]
+        >>> print(len(tsx_tickers))
+        245
+
+    Note:
+        This function is async and must be awaited. It fetches fresh data
+        from exchanges on first call, then serves from cache for 24h.
+
+        Failed fetches for individual exchanges return empty lists (graceful
+        degradation), so total count may vary if exchanges are unavailable.
     """
-    return ALL_STOCKS
+    # Fetch from all exchanges
+    exchange_tickers = await fetch_all_exchange_tickers(exchanges=("NASDAQ", "NYSE", "TSX"))
+
+    # Combine all tickers into single list
+    all_tickers: list[str] = []
+    for symbols in exchange_tickers.values():
+        all_tickers.extend(symbols)
+
+    return all_tickers
