@@ -2,7 +2,7 @@
 
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pandas as pd
 import yfinance as yf
@@ -115,7 +115,8 @@ def fetch_historical_prices(
         if isinstance(e, (InvalidSymbolError, APIError)):
             raise
         logger.error(
-            f"Error fetching historical prices for {symbol} (period={period}, interval={interval}): {e}"
+            f"Error fetching historical prices for {symbol} "
+            f"(period={period}, interval={interval}): {e}"
         )
         raise APIError(f"Failed to fetch historical prices: {str(e)}") from e
 
@@ -190,15 +191,15 @@ def parse_yfinance_data(
         if isinstance(timestamp, pd.Timestamp):
             # If timezone-aware, convert to UTC; if naive, assume UTC
             if timestamp.tz is not None:
-                dt = timestamp.tz_convert(timezone.utc).to_pydatetime()
+                dt = timestamp.tz_convert(UTC).to_pydatetime()
             else:
-                dt = timestamp.to_pydatetime().replace(tzinfo=timezone.utc)
+                dt = timestamp.to_pydatetime().replace(tzinfo=UTC)
         else:
             # Handle datetime objects
             if hasattr(timestamp, "tzinfo") and timestamp.tzinfo is not None:
-                dt = timestamp.astimezone(timezone.utc)
+                dt = timestamp.astimezone(UTC)
             else:
-                dt = timestamp.replace(tzinfo=timezone.utc)
+                dt = timestamp.replace(tzinfo=UTC)
 
         prices.append(
             SecurityPrice(

@@ -2,7 +2,7 @@
 
 import logging
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -23,7 +23,6 @@ from app.services.yfinance_service import (
     APIError,
     InvalidSymbolError,
     fetch_historical_prices,
-    fetch_price_range,
     fetch_security_info,
     parse_yfinance_data,
 )
@@ -37,9 +36,13 @@ async def search_securities(
     q: Annotated[str, Query(min_length=1, max_length=50)],
     db: Annotated[AsyncSession, Depends(get_db)],
     limit: int = 20,
-) -> list[Security]:
+) -> list[SecurityResponse]:
     """
     Search securities by symbol or name (case-insensitive).
+
+    Searches local database first, then queries Yahoo Finance for exact symbol matches
+    if fewer results than limit are found. Results from yfinance are marked with
+    in_database=False and can be synced using the /securities/{symbol}/sync endpoint.
 
     Args:
         q: Search query (searches symbol and name)
@@ -47,7 +50,7 @@ async def search_securities(
         limit: Maximum number of results to return (default: 20)
 
     Returns:
-        List of matching securities ordered by symbol
+        List of matching securities ordered by symbol, with in_database flag
 
     Example:
         GET /api/v1/securities/search?q=apple
@@ -55,6 +58,7 @@ async def search_securities(
     """
     search_pattern = f"%{q}%"
 
+    # Search local database first
     result = await db.execute(
         select(Security)
         .where(
@@ -65,7 +69,79 @@ async def search_securities(
         .limit(limit)
     )
 
-    return list(result.scalars().all())
+    db_securities = list(result.scalars().all())
+
+    # Convert DB results to response models
+    response_securities: list[SecurityResponse] = [
+        SecurityResponse(
+            id=security.id,
+            symbol=security.symbol,
+            name=security.name,
+            exchange=security.exchange,
+            currency=security.currency,
+            security_type=security.security_type,
+            sector=security.sector,
+            industry=security.industry,
+            market_cap=security.market_cap,
+            last_synced_at=security.last_synced_at,
+            is_syncing=security.is_syncing,
+            created_at=security.created_at,
+            updated_at=security.updated_at,
+            in_database=True,
+        )
+        for security in db_securities
+    ]
+
+    # If we have fewer results than the limit, try yfinance for exact symbol match
+    if len(response_securities) < limit and len(q.strip()) > 0:
+        # Check if the query looks like a symbol (short, uppercase-friendly)
+        # and we don't already have an exact match in DB
+        query_upper = q.strip().upper()
+        has_exact_match = any(
+            sec.symbol.upper() == query_upper for sec in db_securities
+        )
+
+        if not has_exact_match and len(query_upper) <= 10:
+            # Try to fetch from yfinance
+            try:
+                logger.info(f"Attempting to fetch symbol '{query_upper}' from yfinance")
+                security_info = fetch_security_info(query_upper)
+
+                # Create a temporary SecurityResponse from yfinance data
+                # Use a temporary UUID since it's not in DB yet
+                now = datetime.now(UTC)
+                yfinance_security = SecurityResponse(
+                    id=uuid.uuid4(),  # Temporary ID
+                    symbol=query_upper,
+                    name=security_info.get("name", query_upper),
+                    exchange=security_info.get("exchange"),
+                    currency=security_info.get("currency"),
+                    security_type=security_info.get("security_type"),
+                    sector=security_info.get("sector"),
+                    industry=security_info.get("industry"),
+                    market_cap=security_info.get("market_cap"),
+                    last_synced_at=None,
+                    is_syncing=False,
+                    created_at=now,
+                    updated_at=now,
+                    in_database=False,  # Mark as not in DB
+                )
+
+                # Add to results (prepend for visibility since it's likely what user wants)
+                response_securities.insert(0, yfinance_security)
+                logger.info(f"Successfully fetched '{query_upper}' from yfinance")
+
+            except InvalidSymbolError:
+                # Symbol not found in yfinance, which is expected for invalid symbols
+                logger.debug(f"Symbol '{query_upper}' not found in yfinance")
+            except APIError as e:
+                # yfinance API error - log but don't fail the request
+                logger.warning(f"yfinance API error for '{query_upper}': {e}")
+            except Exception as e:
+                # Unexpected error - log but don't fail the request
+                logger.error(f"Unexpected error fetching '{query_upper}' from yfinance: {e}")
+
+    return response_securities
 
 
 @router.get("/{symbol}", response_model=SecurityResponse)
@@ -214,7 +290,7 @@ async def sync_security(
             logger.warning(f"Could not fetch intraday data for {symbol}: {e}")
 
         # Update sync status
-        security.last_synced_at = datetime.now(timezone.utc)
+        security.last_synced_at = datetime.now(UTC)
         security.is_syncing = False
         await db.commit()
         await db.refresh(security)
@@ -257,7 +333,8 @@ async def get_security_prices(
     """
     Get price data for a security within a time range.
 
-    If no data is found and security exists, returns empty array with suggestion to sync.
+    Returns available price data even if sparse or outside exact range.
+    Handles weekends, holidays, and non-trading days gracefully.
 
     Args:
         symbol: Stock symbol (e.g., "AAPL", "MSFT")
@@ -268,14 +345,16 @@ async def get_security_prices(
         interval: Price interval - "1m", "1h", "1d", or "1wk" (default: "1d")
 
     Returns:
-        Security info and price data for the requested time range
+        Security info and price data for the requested time range,
+        with metadata about data completeness and actual date range
 
     Raises:
         HTTPException: 404 if security not found
 
     Example:
         GET /api/v1/securities/AAPL/prices?interval=1d
-        GET /api/v1/securities/AAPL/prices?start=2024-01-01T00:00:00Z&end=2024-12-31T23:59:59Z&interval=1d
+        GET /api/v1/securities/AAPL/prices?start=2024-01-01T00:00:00Z
+            &end=2024-12-31T23:59:59Z&interval=1d
     """
     # Get security
     result = await db.execute(
@@ -290,38 +369,107 @@ async def get_security_prices(
         )
 
     # Set default time range based on interval if not provided
-    now = datetime.now(timezone.utc)
-    if end is None:
-        end = now
+    now = datetime.now(UTC)
 
+    # Handle end datetime
+    if end is None:
+        requested_end = now
+    elif end.tzinfo is None:
+        requested_end = end.replace(tzinfo=UTC)
+    else:
+        requested_end = end
+
+    # Handle start datetime
     if start is None:
         if interval == "1m":
             # Last 24 hours for minute data
-            start = now - timedelta(days=1)
+            requested_start = now - timedelta(days=1)
         else:
             # Last 30 days for other intervals
-            start = now - timedelta(days=30)
+            requested_start = now - timedelta(days=30)
+    elif start.tzinfo is None:
+        requested_start = start.replace(tzinfo=UTC)
+    else:
+        requested_start = start
 
-    # Ensure timezone awareness
-    if start.tzinfo is None:
-        start = start.replace(tzinfo=timezone.utc)
-    if end.tzinfo is None:
-        end = end.replace(tzinfo=timezone.utc)
+    # Expand search range to find nearby data if exact range has gaps
+    # This handles weekends, holidays, and sparse trading data
+    search_buffer_days = 7  # Look 7 days before/after for data
+    expanded_start = requested_start - timedelta(days=search_buffer_days)
+    expanded_end = requested_end + timedelta(days=search_buffer_days)
 
-    # Query prices
+    # Query prices with expanded range
     query = (
         select(SecurityPrice)
         .where(
             (SecurityPrice.security_id == security.id)
             & (SecurityPrice.interval_type == interval)
-            & (SecurityPrice.timestamp >= start)
-            & (SecurityPrice.timestamp <= end)
+            & (SecurityPrice.timestamp >= expanded_start)
+            & (SecurityPrice.timestamp <= expanded_end)
         )
         .order_by(SecurityPrice.timestamp.asc())
     )
 
     result = await db.execute(query)
-    prices = list(result.scalars().all())
+    all_prices = list(result.scalars().all())
+
+    # Filter to get prices closest to requested range
+    # Prioritize data within requested range, then nearby data
+    # Ensure all timestamps are timezone-aware for comparison
+    prices_in_range = [
+        p
+        for p in all_prices
+        if requested_start
+        <= (
+            p.timestamp.replace(tzinfo=UTC)
+            if p.timestamp.tzinfo is None
+            else p.timestamp
+        )
+        <= requested_end
+    ]
+
+    # If no data in exact range, use all available data from expanded search
+    prices_to_return = prices_in_range if prices_in_range else all_prices
+
+    # Calculate actual date range and data completeness
+    actual_start = None
+    actual_end = None
+    data_completeness = "empty"
+
+    if prices_to_return:
+        actual_start = prices_to_return[0].timestamp
+        actual_end = prices_to_return[-1].timestamp
+
+        # Determine data completeness
+        if not prices_in_range:
+            # Data exists but outside requested range
+            data_completeness = "partial"
+        else:
+            # Calculate expected vs actual data points based on interval
+            time_span_days = (requested_end - requested_start).days
+
+            if interval == "1d":
+                # Daily data: expect ~5 trading days per week
+                expected_points = max(1, int(time_span_days * 5 / 7))
+            elif interval == "1wk":
+                # Weekly data: expect ~1 point per week
+                expected_points = max(1, time_span_days // 7)
+            elif interval == "1h":
+                # Hourly data: expect ~6.5 trading hours per day
+                expected_points = max(1, int(time_span_days * 6.5))
+            else:  # "1m"
+                # Minute data: expect ~390 minutes per trading day
+                expected_points = max(1, int(time_span_days * 390))
+
+            actual_points = len(prices_in_range)
+            completeness_ratio = actual_points / expected_points if expected_points > 0 else 0
+
+            if completeness_ratio >= 0.8:
+                data_completeness = "complete"
+            elif completeness_ratio >= 0.4:
+                data_completeness = "partial"
+            else:
+                data_completeness = "sparse"
 
     # Convert to PriceData schema
     price_data = [
@@ -333,7 +481,7 @@ async def get_security_prices(
             close=price.close,
             volume=price.volume,
         )
-        for price in prices
+        for price in prices_to_return
     ]
 
     return SecurityPricesResponse(
@@ -341,4 +489,9 @@ async def get_security_prices(
         prices=price_data,
         interval_type=interval,
         count=len(price_data),
+        requested_start=requested_start,
+        requested_end=requested_end,
+        actual_start=actual_start,
+        actual_end=actual_end,
+        data_completeness=data_completeness,
     )

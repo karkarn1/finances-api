@@ -1,8 +1,7 @@
 """Tests for securities endpoints."""
 
 import uuid
-from datetime import datetime, timedelta, timezone
-from unittest.mock import MagicMock
+from datetime import UTC, datetime, timedelta
 
 import pandas as pd
 import pytest
@@ -12,7 +11,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.security import Security
 from app.models.security_price import SecurityPrice
 from app.models.user import User
-
 
 pytestmark = pytest.mark.integration
 
@@ -43,9 +41,9 @@ def create_sample_dataframe():
         SAMPLE_PRICE_DATA,
         index=pd.DatetimeIndex(
             [
-                datetime(2024, 1, 1, tzinfo=timezone.utc),
-                datetime(2024, 1, 2, tzinfo=timezone.utc),
-                datetime(2024, 1, 3, tzinfo=timezone.utc),
+                datetime(2024, 1, 1, tzinfo=UTC),
+                datetime(2024, 1, 2, tzinfo=UTC),
+                datetime(2024, 1, 3, tzinfo=UTC),
             ]
         ),
     )
@@ -53,13 +51,42 @@ def create_sample_dataframe():
 
 
 @pytest.mark.asyncio
-async def test_search_securities_empty(
-    client: AsyncClient, test_user: User, auth_headers: dict[str, str]
+async def test_search_securities_empty_no_yfinance_match(
+    client: AsyncClient, test_user: User, auth_headers: dict[str, str], mocker
 ):
-    """Test searching securities when database is empty."""
-    response = await client.get("/api/v1/securities/search?q=AAPL")
+    """Test searching securities when database is empty and yfinance has no match."""
+    from app.services.yfinance_service import InvalidSymbolError
+
+    # Mock yfinance to return no results
+    mocker.patch(
+        "app.api.routes.securities.fetch_security_info",
+        side_effect=InvalidSymbolError("Symbol not found"),
+    )
+
+    response = await client.get("/api/v1/securities/search?q=INVALID")
     assert response.status_code == 200
     assert response.json() == []
+
+
+@pytest.mark.asyncio
+async def test_search_securities_empty_with_yfinance_match(
+    client: AsyncClient, test_user: User, auth_headers: dict[str, str], mocker
+):
+    """Test searching securities when database is empty but yfinance has a match."""
+    # Mock yfinance to return a valid security
+    mocker.patch(
+        "app.api.routes.securities.fetch_security_info",
+        return_value=SAMPLE_YFINANCE_INFO,
+    )
+
+    response = await client.get("/api/v1/securities/search?q=AAPL")
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data) == 1
+    assert data[0]["symbol"] == "AAPL"
+    assert data[0]["name"] == "Apple Inc."
+    assert data[0]["in_database"] is False  # Not in DB yet
+    assert data[0]["last_synced_at"] is None
 
 
 @pytest.mark.asyncio
@@ -68,6 +95,7 @@ async def test_search_securities_by_symbol(
     test_db: AsyncSession,
     test_user: User,
     auth_headers: dict[str, str],
+    mocker,
 ):
     """Test searching securities by symbol."""
     # Create test security
@@ -81,12 +109,214 @@ async def test_search_securities_by_symbol(
     test_db.add(security)
     await test_db.commit()
 
+    # Mock yfinance to prevent real API calls
+    from app.services.yfinance_service import InvalidSymbolError
+    mocker.patch(
+        "app.api.routes.securities.fetch_security_info",
+        side_effect=InvalidSymbolError("Symbol not found"),
+    )
+
     response = await client.get("/api/v1/securities/search?q=AAP")
     assert response.status_code == 200
     data = response.json()
     assert len(data) == 1
     assert data[0]["symbol"] == "AAPL"
     assert data[0]["name"] == "Apple Inc."
+    assert data[0]["in_database"] is True  # DB result should be marked
+
+
+@pytest.mark.asyncio
+async def test_search_securities_db_results_have_in_database_flag(
+    client: AsyncClient,
+    test_db: AsyncSession,
+    test_user: User,
+    auth_headers: dict[str, str],
+):
+    """Test that database results are marked with in_database=True."""
+    # Create test security
+    security = Security(
+        id=uuid.uuid4(),
+        symbol="MSFT",
+        name="Microsoft Corporation",
+        exchange="NASDAQ",
+        currency="USD",
+    )
+    test_db.add(security)
+    await test_db.commit()
+
+    response = await client.get("/api/v1/securities/search?q=MSFT")
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data) == 1
+    assert data[0]["in_database"] is True
+
+
+@pytest.mark.asyncio
+async def test_search_securities_exact_match_skips_yfinance(
+    client: AsyncClient,
+    test_db: AsyncSession,
+    test_user: User,
+    auth_headers: dict[str, str],
+    mocker,
+):
+    """Test that exact symbol match in DB prevents yfinance call."""
+    # Create test security
+    security = Security(
+        id=uuid.uuid4(),
+        symbol="AAPL",
+        name="Apple Inc.",
+        exchange="NASDAQ",
+        currency="USD",
+    )
+    test_db.add(security)
+    await test_db.commit()
+
+    # Mock yfinance - should not be called
+    mock_yfinance = mocker.patch(
+        "app.api.routes.securities.fetch_security_info",
+        return_value=SAMPLE_YFINANCE_INFO,
+    )
+
+    response = await client.get("/api/v1/securities/search?q=AAPL")
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data) == 1
+    assert data[0]["symbol"] == "AAPL"
+    assert data[0]["in_database"] is True
+
+    # Verify yfinance was not called (exact match exists)
+    mock_yfinance.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_search_securities_partial_match_tries_yfinance(
+    client: AsyncClient,
+    test_db: AsyncSession,
+    test_user: User,
+    auth_headers: dict[str, str],
+    mocker,
+):
+    """Test that partial DB match still tries yfinance for exact symbol."""
+    # Create test security with similar name but different symbol
+    security = Security(
+        id=uuid.uuid4(),
+        symbol="GOOGL",
+        name="Alphabet Inc.",
+        exchange="NASDAQ",
+        currency="USD",
+    )
+    test_db.add(security)
+    await test_db.commit()
+
+    # Mock yfinance to return a different security
+    mocker.patch(
+        "app.api.routes.securities.fetch_security_info",
+        return_value={
+            "name": "Apple Inc.",
+            "exchange": "NASDAQ",
+            "currency": "USD",
+            "security_type": "EQUITY",
+            "sector": "Technology",
+            "industry": "Consumer Electronics",
+            "market_cap": 2800000000000,
+        },
+    )
+
+    # Search for "AAPL" - no exact match in DB, should query yfinance
+    response = await client.get("/api/v1/securities/search?q=AAPL")
+    assert response.status_code == 200
+    data = response.json()
+
+    # Should have the yfinance result (no DB matches for AAPL)
+    assert len(data) == 1
+    assert data[0]["symbol"] == "AAPL"
+    assert data[0]["in_database"] is False
+
+
+@pytest.mark.asyncio
+async def test_search_securities_long_query_skips_yfinance(
+    client: AsyncClient,
+    test_db: AsyncSession,
+    test_user: User,
+    auth_headers: dict[str, str],
+    mocker,
+):
+    """Test that long queries (>10 chars) skip yfinance lookup."""
+    # Mock yfinance - should not be called
+    mock_yfinance = mocker.patch(
+        "app.api.routes.securities.fetch_security_info",
+        return_value=SAMPLE_YFINANCE_INFO,
+    )
+
+    response = await client.get("/api/v1/securities/search?q=ThisIsAReallyLongQuery")
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data) == 0
+
+    # Verify yfinance was not called (query too long)
+    mock_yfinance.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_search_securities_yfinance_api_error_doesnt_fail(
+    client: AsyncClient,
+    test_user: User,
+    auth_headers: dict[str, str],
+    mocker,
+):
+    """Test that yfinance API errors don't fail the search request."""
+    from app.services.yfinance_service import APIError
+
+    # Mock yfinance to raise API error
+    mocker.patch(
+        "app.api.routes.securities.fetch_security_info",
+        side_effect=APIError("API unavailable"),
+    )
+
+    # Request should succeed, just without yfinance results
+    response = await client.get("/api/v1/securities/search?q=AAPL")
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data) == 0  # No results but no error
+
+
+@pytest.mark.asyncio
+async def test_search_securities_yfinance_prepended_to_results(
+    client: AsyncClient,
+    test_db: AsyncSession,
+    test_user: User,
+    auth_headers: dict[str, str],
+    mocker,
+):
+    """Test that yfinance results are prepended (shown first)."""
+    # Create test security with name containing the search term but different symbol
+    security = Security(
+        id=uuid.uuid4(),
+        symbol="MSFT",
+        name="Microsoft Corporation (Apple Partner)",  # Contains "apple"
+        exchange="NASDAQ",
+        currency="USD",
+    )
+    test_db.add(security)
+    await test_db.commit()
+
+    # Mock yfinance to return AAPL
+    mocker.patch(
+        "app.api.routes.securities.fetch_security_info",
+        return_value=SAMPLE_YFINANCE_INFO,
+    )
+
+    # Search for "apple" - should find MSFT in DB by name, and fetch AAPL from yfinance
+    response = await client.get("/api/v1/securities/search?q=apple")
+    assert response.status_code == 200
+    data = response.json()
+
+    # Should have 2 results: yfinance result first, then DB result
+    assert len(data) == 2
+    assert data[0]["symbol"] == "APPLE"  # yfinance result first (query uppercased)
+    assert data[0]["in_database"] is False
+    assert data[1]["symbol"] == "MSFT"  # DB result second
+    assert data[1]["in_database"] is True
 
 
 @pytest.mark.asyncio
@@ -318,6 +548,9 @@ async def test_get_prices_no_data(
     assert data["security"]["symbol"] == "AAPL"
     assert data["prices"] == []
     assert data["count"] == 0
+    assert data["data_completeness"] == "empty"
+    assert data["actual_start"] is None
+    assert data["actual_end"] is None
 
 
 @pytest.mark.asyncio
@@ -338,7 +571,7 @@ async def test_get_prices_with_data(
     await test_db.refresh(security)
 
     # Add price data - use recent dates within last 30 days
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     for i in range(5):
         price = SecurityPrice(
             id=uuid.uuid4(),
@@ -387,7 +620,7 @@ async def test_get_prices_with_date_range(
         price = SecurityPrice(
             id=uuid.uuid4(),
             security_id=security.id,
-            timestamp=datetime(2024, 1, i + 1, tzinfo=timezone.utc),
+            timestamp=datetime(2024, 1, i + 1, tzinfo=UTC),
             open=150.0 + i,
             high=155.0 + i,
             low=149.0 + i,
@@ -428,7 +661,7 @@ async def test_get_prices_different_intervals(
     await test_db.refresh(security)
 
     # Add both daily and minute prices - use recent dates
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     for i in range(3):
         # Daily - within last 30 days
         price_daily = SecurityPrice(
@@ -498,3 +731,268 @@ async def test_get_prices_invalid_interval(
         "/api/v1/securities/AAPL/prices?interval=5m", headers=auth_headers
     )
     assert response.status_code == 422  # Validation error
+
+
+@pytest.mark.asyncio
+async def test_get_prices_sparse_data_weekends(
+    client: AsyncClient,
+    test_db: AsyncSession,
+    test_user: User,
+    auth_headers: dict[str, str],
+):
+    """Test getting prices when requested range includes weekends with no data."""
+    security = Security(
+        id=uuid.uuid4(),
+        symbol="AAPL",
+        name="Apple Inc.",
+    )
+    test_db.add(security)
+    await test_db.commit()
+    await test_db.refresh(security)
+
+    # Add price data only for weekdays (Jan 1-5, 2024 were Mon-Fri)
+    weekday_dates = [
+        datetime(2024, 1, 1, tzinfo=UTC),  # Monday
+        datetime(2024, 1, 2, tzinfo=UTC),  # Tuesday
+        datetime(2024, 1, 3, tzinfo=UTC),  # Wednesday
+        datetime(2024, 1, 4, tzinfo=UTC),  # Thursday
+        datetime(2024, 1, 5, tzinfo=UTC),  # Friday
+    ]
+
+    for i, date in enumerate(weekday_dates):
+        price = SecurityPrice(
+            id=uuid.uuid4(),
+            security_id=security.id,
+            timestamp=date,
+            open=150.0 + i,
+            high=155.0 + i,
+            low=149.0 + i,
+            close=154.0 + i,
+            volume=1000000 + i * 100000,
+            interval_type="1d",
+        )
+        test_db.add(price)
+    await test_db.commit()
+
+    # Query for range including weekend (Jan 1-7, 2024)
+    response = await client.get(
+        "/api/v1/securities/AAPL/prices"
+        "?start=2024-01-01T00:00:00Z&end=2024-01-07T23:59:59Z&interval=1d",
+        headers=auth_headers,
+    )
+    assert response.status_code == 200
+    data = response.json()
+
+    # Should return the 5 weekday data points
+    assert data["count"] == 5
+    assert len(data["prices"]) == 5
+    # Data completeness should be "partial" or "complete" (5 trading days in 7 calendar days)
+    assert data["data_completeness"] in ["complete", "partial"]
+    assert data["actual_start"] is not None
+    assert data["actual_end"] is not None
+
+
+@pytest.mark.asyncio
+async def test_get_prices_data_outside_requested_range(
+    client: AsyncClient,
+    test_db: AsyncSession,
+    test_user: User,
+    auth_headers: dict[str, str],
+):
+    """Test that endpoint returns nearby data when exact range has no data."""
+    security = Security(
+        id=uuid.uuid4(),
+        symbol="AAPL",
+        name="Apple Inc.",
+    )
+    test_db.add(security)
+    await test_db.commit()
+    await test_db.refresh(security)
+
+    # Add price data a few days before the requested range (within 7-day buffer)
+    # Data on Jan 25-29
+    for i in range(5):
+        price = SecurityPrice(
+            id=uuid.uuid4(),
+            security_id=security.id,
+            timestamp=datetime(2024, 1, 25 + i, tzinfo=UTC),
+            open=150.0 + i,
+            high=155.0 + i,
+            low=149.0 + i,
+            close=154.0 + i,
+            volume=1000000 + i * 100000,
+            interval_type="1d",
+        )
+        test_db.add(price)
+    await test_db.commit()
+
+    # Request data for early February (Feb 1-5)
+    # No exact data, but Jan 25-29 is within 7-day buffer
+    response = await client.get(
+        "/api/v1/securities/AAPL/prices"
+        "?start=2024-02-01T00:00:00Z&end=2024-02-05T23:59:59Z&interval=1d",
+        headers=auth_headers,
+    )
+    assert response.status_code == 200
+    data = response.json()
+
+    # Should return the late January data (within 7-day buffer)
+    assert data["count"] == 5
+    assert data["data_completeness"] == "partial"
+    # Actual dates should be in late January
+    assert data["actual_start"] is not None
+    assert "2024-01-25" in data["actual_start"]
+
+
+@pytest.mark.asyncio
+async def test_get_prices_very_sparse_data(
+    client: AsyncClient,
+    test_db: AsyncSession,
+    test_user: User,
+    auth_headers: dict[str, str],
+):
+    """Test getting prices when data is very sparse (low volume stock)."""
+    security = Security(
+        id=uuid.uuid4(),
+        symbol="LOWVOL",
+        name="Low Volume Stock",
+    )
+    test_db.add(security)
+    await test_db.commit()
+    await test_db.refresh(security)
+
+    # Add only 2 data points over 30 days (very sparse)
+    sparse_dates = [
+        datetime(2024, 1, 1, tzinfo=UTC),
+        datetime(2024, 1, 30, tzinfo=UTC),
+    ]
+
+    for i, date in enumerate(sparse_dates):
+        price = SecurityPrice(
+            id=uuid.uuid4(),
+            security_id=security.id,
+            timestamp=date,
+            open=10.0 + i,
+            high=11.0 + i,
+            low=9.0 + i,
+            close=10.5 + i,
+            volume=10000,
+            interval_type="1d",
+        )
+        test_db.add(price)
+    await test_db.commit()
+
+    # Query for the full range
+    response = await client.get(
+        "/api/v1/securities/LOWVOL/prices"
+        "?start=2024-01-01T00:00:00Z&end=2024-01-31T23:59:59Z&interval=1d",
+        headers=auth_headers,
+    )
+    assert response.status_code == 200
+    data = response.json()
+
+    # Should return both sparse points
+    assert data["count"] == 2
+    assert data["data_completeness"] == "sparse"
+    assert data["actual_start"] is not None
+    assert data["actual_end"] is not None
+
+
+@pytest.mark.asyncio
+async def test_get_prices_complete_data(
+    client: AsyncClient,
+    test_db: AsyncSession,
+    test_user: User,
+    auth_headers: dict[str, str],
+):
+    """Test that complete data is properly flagged."""
+    security = Security(
+        id=uuid.uuid4(),
+        symbol="COMPLETE",
+        name="Complete Data Stock",
+    )
+    test_db.add(security)
+    await test_db.commit()
+    await test_db.refresh(security)
+
+    # Add comprehensive data for 10 trading days
+    for i in range(10):
+        price = SecurityPrice(
+            id=uuid.uuid4(),
+            security_id=security.id,
+            timestamp=datetime(2024, 1, i + 1, tzinfo=UTC),
+            open=150.0 + i,
+            high=155.0 + i,
+            low=149.0 + i,
+            close=154.0 + i,
+            volume=1000000,
+            interval_type="1d",
+        )
+        test_db.add(price)
+    await test_db.commit()
+
+    # Query for range that has complete data
+    response = await client.get(
+        "/api/v1/securities/COMPLETE/prices"
+        "?start=2024-01-01T00:00:00Z&end=2024-01-10T23:59:59Z&interval=1d",
+        headers=auth_headers,
+    )
+    assert response.status_code == 200
+    data = response.json()
+
+    assert data["count"] == 10
+    # Should be "complete" since we have all 10 days
+    assert data["data_completeness"] == "complete"
+
+
+@pytest.mark.asyncio
+async def test_get_prices_metadata_fields(
+    client: AsyncClient,
+    test_db: AsyncSession,
+    test_user: User,
+    auth_headers: dict[str, str],
+):
+    """Test that all metadata fields are present in response."""
+    security = Security(
+        id=uuid.uuid4(),
+        symbol="META",
+        name="Metadata Test",
+    )
+    test_db.add(security)
+    await test_db.commit()
+    await test_db.refresh(security)
+
+    # Add some price data
+    price = SecurityPrice(
+        id=uuid.uuid4(),
+        security_id=security.id,
+        timestamp=datetime(2024, 1, 15, tzinfo=UTC),
+        open=100.0,
+        high=105.0,
+        low=99.0,
+        close=103.0,
+        volume=500000,
+        interval_type="1d",
+    )
+    test_db.add(price)
+    await test_db.commit()
+
+    response = await client.get(
+        "/api/v1/securities/META/prices"
+        "?start=2024-01-01T00:00:00Z&end=2024-01-31T23:59:59Z&interval=1d",
+        headers=auth_headers,
+    )
+    assert response.status_code == 200
+    data = response.json()
+
+    # Verify all metadata fields exist
+    assert "requested_start" in data
+    assert "requested_end" in data
+    assert "actual_start" in data
+    assert "actual_end" in data
+    assert "data_completeness" in data
+    assert data["requested_start"] is not None
+    assert data["requested_end"] is not None
+    assert data["actual_start"] is not None
+    assert data["actual_end"] is not None
+    assert data["data_completeness"] in ["complete", "partial", "sparse", "empty"]

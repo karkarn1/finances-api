@@ -54,10 +54,18 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(['security_id'], ['securities.id'], ondelete='CASCADE'),
     )
     op.create_index('ix_security_prices_id', 'security_prices', ['id'])
-    op.create_index('ix_security_prices_security_id', 'security_prices', ['security_id'])
+    op.create_index(
+        'ix_security_prices_security_id', 'security_prices', ['security_id']
+    )
     op.create_index('ix_security_prices_timestamp', 'security_prices', ['timestamp'])
-    op.create_index('idx_security_time', 'security_prices', ['security_id', 'timestamp'])
-    op.create_index('idx_security_interval_time', 'security_prices', ['security_id', 'interval_type', 'timestamp'])
+    op.create_index(
+        'idx_security_time', 'security_prices', ['security_id', 'timestamp']
+    )
+    op.create_index(
+        'idx_security_interval_time',
+        'security_prices',
+        ['security_id', 'interval_type', 'timestamp'],
+    )
 
 
 def downgrade() -> None:

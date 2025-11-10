@@ -33,6 +33,7 @@ class SecurityResponse(SecurityBase):
     is_syncing: bool
     created_at: datetime
     updated_at: datetime
+    in_database: bool = True  # Indicates if security exists in DB or fetched from yfinance
 
     model_config = {"from_attributes": True}
 
@@ -55,6 +56,11 @@ class SecurityPricesResponse(BaseModel):
     prices: list[PriceData]
     interval_type: str
     count: int
+    requested_start: datetime | None = None
+    requested_end: datetime | None = None
+    actual_start: datetime | None = None
+    actual_end: datetime | None = None
+    data_completeness: str = "complete"  # "complete", "partial", "sparse", "empty"
 
 
 class SyncResponse(BaseModel):
