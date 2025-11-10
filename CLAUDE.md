@@ -109,6 +109,16 @@ make test
 make test-cov
 # Equivalent to: docker-compose exec app pytest --cov=src --cov-report=term-missing
 
+# Run specific test file
+docker-compose exec app pytest tests/api/routes/test_login.py -v
+
+# Run specific test function
+docker-compose exec app pytest tests/api/routes/test_login.py::test_register_with_valid_data -v
+
+# Run tests by marker
+docker-compose exec app pytest -m unit          # Unit tests only
+docker-compose exec app pytest -m integration   # Integration tests only
+
 # Run tests locally (requires local uv setup)
 make test-local
 # Equivalent to: uv run pytest
@@ -176,6 +186,24 @@ The API will be available at:
 - Database session management via `AsyncSession` with proper connection pooling
 - FastAPI's lifespan events handle engine initialization and disposal
 
+### Authentication System
+- **JWT Tokens**: Stateless authentication using PyJWT (HS256 algorithm)
+- **Password Hashing**: Argon2 via pwdlib (modern, recommended over bcrypt)
+- **Token Types**:
+  - Access tokens (30 min expiration)
+  - Refresh tokens (7 day expiration)
+- **Security Utilities**: Located in `src/app/core/security.py`
+  - `get_password_hash()` - Hash passwords with Argon2
+  - `verify_password()` - Verify password against hash
+  - `create_access_token()` - Generate JWT access tokens
+  - `create_refresh_token()` - Generate JWT refresh tokens
+  - `decode_token()` - Validate and decode JWT tokens
+- **Authentication Dependencies**: Located in `src/app/core/deps.py`
+  - `get_current_user()` - Extract and validate user from JWT
+  - `get_current_active_user()` - Ensure user is active
+  - `get_current_superuser()` - Ensure user has superuser privileges
+- **Type Aliases**: Use `CurrentUser`, `CurrentActiveUser`, `CurrentSuperUser` for cleaner dependency injection
+
 ### Database Layer
 - **Base Model**: All models inherit from `Base` (AsyncAttrs + DeclarativeBase) in `src/app/db/base.py`
 - **TimestampMixin**: Provides automatic `created_at` and `updated_at` fields using `datetime.utcnow`
@@ -184,8 +212,9 @@ The API will be available at:
 
 ### Configuration Management
 - Centralized in `src/app/core/config.py` using Pydantic Settings
-- Environment variables loaded from `.env` file
+- Environment variables loaded from `.env` file (must be mounted in Docker via `env_file`)
 - Settings accessed via singleton `settings` instance
+- **Critical**: `.env` file must be listed in `docker-compose.yml` under `env_file` for JWT tokens to work correctly
 - Database URL dynamically set in Alembic's `env.py` from settings
 
 ### Alembic Migration Strategy
@@ -197,8 +226,39 @@ The API will be available at:
 ### API Structure
 - **Versioning**: API routes prefixed with `/api/v1`
 - **Route modules**: Separate router files in `src/app/api/routes/`
+  - `auth.py` - Authentication endpoints (register, login, tokens, /me)
+  - `users.py` - User CRUD operations (protected)
+  - `health.py` - Health check endpoints
 - **Dependency injection**: Database sessions injected via FastAPI's `Depends(get_db)`
 - **Response models**: Pydantic schemas in `src/app/schemas/` for request/response validation
+- **Authorization**: Routes use dependency injection to enforce authentication and permission checks
+
+### Test Structure (FastAPI Template Pattern)
+Tests are organized following the official FastAPI full-stack template:
+```
+tests/
+├── conftest.py              # Shared fixtures (SQLite in-memory DB, test client, auth)
+├── api/
+│   └── routes/
+│       ├── test_login.py    # Authentication endpoint tests
+│       ├── test_users.py    # User endpoint tests
+│       └── test_utils.py    # Health check tests
+└── utils/
+    └── test_security.py     # Security utility tests (password, JWT)
+```
+
+**Test Fixtures** (in `conftest.py`):
+- `test_engine` - SQLite in-memory database engine
+- `test_db` - Database session for tests
+- `client` - AsyncClient with dependency overrides
+- `test_user` - Regular user fixture
+- `test_superuser` - Superuser fixture
+- `test_inactive_user` - Inactive user fixture
+- `auth_headers`, `superuser_auth_headers` - Pre-authenticated request headers
+
+**Test Markers**:
+- `@pytest.mark.unit` - Unit tests (security, utilities)
+- `@pytest.mark.integration` - Integration tests (API endpoints)
 
 ### Development vs Production
 - In development mode (`ENVIRONMENT=development`), tables are auto-created via `Base.metadata.create_all()` in lifespan startup
