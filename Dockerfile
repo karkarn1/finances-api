@@ -38,6 +38,7 @@ USER appuser
 
 # Set Python path to use virtual environment
 ENV PATH="/app/.venv/bin:$PATH"
+ENV PYTHONPATH="/app/src:$PYTHONPATH"
 
 # Expose port
 EXPOSE 8000
