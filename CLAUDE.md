@@ -226,8 +226,9 @@ The API will be available at:
 ### API Structure
 - **Versioning**: API routes prefixed with `/api/v1`
 - **Route modules**: Separate router files in `src/app/api/routes/`
-  - `auth.py` - Authentication endpoints (register, login, tokens, /me)
+  - `auth.py` - Authentication endpoints (register, login, tokens, /me, password reset)
   - `users.py` - User CRUD operations (protected)
+  - `securities.py` - Securities tracking (search, details, sync, prices) with yfinance integration
   - `health.py` - Health check endpoints
 - **Dependency injection**: Database sessions injected via FastAPI's `Depends(get_db)`
 - **Response models**: Pydantic schemas in `src/app/schemas/` for request/response validation
@@ -240,12 +241,18 @@ tests/
 ├── conftest.py              # Shared fixtures (SQLite in-memory DB, test client, auth)
 ├── api/
 │   └── routes/
-│       ├── test_login.py    # Authentication endpoint tests
+│       ├── test_login.py    # Authentication endpoint tests (72 tests)
 │       ├── test_users.py    # User endpoint tests
+│       ├── test_securities.py # Securities endpoint tests (17 tests)
 │       └── test_utils.py    # Health check tests
 └── utils/
     └── test_security.py     # Security utility tests (password, JWT)
 ```
+
+**Test Coverage:** 89 tests passing
+- Authentication tests: 72 tests (register, login, tokens, password reset, /me)
+- Securities tests: 17 tests (search, details, sync, prices)
+- Security utility tests: Password hashing, JWT token generation/validation
 
 **Test Fixtures** (in `conftest.py`):
 - `test_engine` - SQLite in-memory database engine
@@ -259,6 +266,21 @@ tests/
 **Test Markers**:
 - `@pytest.mark.unit` - Unit tests (security, utilities)
 - `@pytest.mark.integration` - Integration tests (API endpoints)
+
+### Securities Tracking Architecture
+- **Models**: `Security` and `SecurityPrice` in `src/app/models/`
+  - `Security`: Symbol, name, asset class, currency (from yfinance)
+  - `SecurityPrice`: OHLCV data with interval support (1m, 1h, 1d, 1wk, 1mo)
+- **Service Layer**: `YFinanceService` in `src/app/services/yfinance_service.py`
+  - `search_securities()` - Search for securities
+  - `get_security_info()` - Fetch security details from Yahoo Finance
+  - `sync_security_data()` - Sync security and historical prices
+  - `get_historical_prices()` - Retrieve stored price data with filtering
+- **Schemas**: Request/response models in `src/app/schemas/security.py`
+  - Search requests/responses
+  - Security detail models
+  - Price data models with timeframe support
+- **Database Indexes**: Optimized for symbol lookup and date-range queries
 
 ### Development vs Production
 - In development mode (`ENVIRONMENT=development`), tables are auto-created via `Base.metadata.create_all()` in lifespan startup
@@ -280,6 +302,26 @@ tests/
 3. Import and include router in `src/main.py` with appropriate prefix and tags
 4. Use async/await for all database operations
 5. Return Pydantic response models for proper serialization
+6. Add tests in `tests/api/routes/test_<endpoint>.py`
+7. For protected endpoints, use `CurrentActiveUser` dependency
+
+**Example:**
+```python
+# src/app/api/routes/my_endpoint.py
+from fastapi import APIRouter, Depends
+from sqlalchemy.ext.asyncio import AsyncSession
+from app.core.deps import get_db, CurrentActiveUser
+
+router = APIRouter()
+
+@router.get("/items")
+async def get_items(
+    db: AsyncSession = Depends(get_db),
+    current_user: CurrentActiveUser = None,  # Protected route
+):
+    # Implementation
+    pass
+```
 
 ### Database Queries
 ```python
