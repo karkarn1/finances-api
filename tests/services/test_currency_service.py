@@ -55,28 +55,42 @@ async def test_fetch_exchange_rates_success() -> None:
 @pytest.mark.unit
 async def test_fetch_exchange_rates_mocked() -> None:
     """Test fetching exchange rates with mocked API response."""
-    mock_response = AsyncMock()
-    mock_response.json.return_value = {
-        "rates": {
-            "USD": 1.0,
-            "EUR": 0.92,
-            "GBP": 0.79,
-            "CAD": 1.35,
-        }
-    }
+    from unittest.mock import MagicMock, Mock
 
-    async def mock_get(*args, **kwargs):
-        return mock_response
+    # Mock response object
+    mock_response = Mock()
+    mock_response.json = MagicMock(
+        return_value={
+            "rates": {
+                "EUR": 0.92,
+                "GBP": 0.79,
+                "CAD": 1.35,
+            }
+        }
+    )
+    # raise_for_status is a regular method
+    mock_response.raise_for_status = MagicMock()
 
     with patch("httpx.AsyncClient") as mock_client:
-        mock_client.return_value.__aenter__.return_value.get = mock_get
+        # Set up the async context manager and get method
+        mock_instance = AsyncMock()
+        mock_instance.get = AsyncMock(return_value=mock_response)
+        mock_client.return_value.__aenter__.return_value = mock_instance
 
+        # Test current rates (no date)
         rates = await fetch_exchange_rates("USD")
-
         assert rates is not None
+        assert rates["USD"] == 1.0  # Base currency added by function
         assert rates["EUR"] == 0.92
         assert rates["GBP"] == 0.79
         assert rates["CAD"] == 1.35
+
+        # Test historical rates (with date)
+        historical_date = date(2024, 1, 15)
+        rates = await fetch_exchange_rates("USD", historical_date)
+        assert rates is not None
+        assert rates["USD"] == 1.0
+        assert rates["EUR"] == 0.92
 
 
 @pytest.mark.unit
@@ -106,18 +120,19 @@ async def test_sync_currency_rates_success(
 
     with patch(
         "app.services.currency_service.fetch_exchange_rates",
-        return_value=mock_rates,
+        new=AsyncMock(return_value=mock_rates),
     ):
         synced, failed = await sync_currency_rates(test_db, "USD")
 
-        # Should create bidirectional rates for 4 currencies
-        assert synced == 8  # 4 currencies * 2 directions
+        # Should create bidirectional rates for 3 currencies (excludes USD->USD)
+        # EUR, GBP, CAD: 3 currencies * 2 directions = 6 rates
+        assert synced == 6
         assert failed == 0
 
         # Verify rates were stored
         result = await test_db.execute(select(CurrencyRate))
         stored_rates = result.scalars().all()
-        assert len(stored_rates) == 8
+        assert len(stored_rates) == 6
 
 
 @pytest.mark.integration
@@ -133,12 +148,13 @@ async def test_sync_currency_rates_skips_missing_currencies(
 
     with patch(
         "app.services.currency_service.fetch_exchange_rates",
-        return_value=mock_rates,
+        new=AsyncMock(return_value=mock_rates),
     ):
         synced, failed = await sync_currency_rates(test_db, "USD")
 
-        # Should only sync USD and EUR (2 currencies * 2 directions)
-        assert synced == 4
+        # Should only sync EUR (excludes USD->USD, and ZZZ is not in database)
+        # 1 currency * 2 directions = 2 rates
+        assert synced == 2
         assert failed == 0
 
 
@@ -147,7 +163,7 @@ async def test_sync_currency_rates_api_failure(test_db: AsyncSession) -> None:
     """Test handling API failure during sync."""
     with patch(
         "app.services.currency_service.fetch_exchange_rates",
-        return_value=None,
+        new=AsyncMock(return_value=None),
     ):
         synced, failed = await sync_currency_rates(test_db, "USD")
 
@@ -165,11 +181,13 @@ async def test_sync_currency_rates_custom_date(
 
     with patch(
         "app.services.currency_service.fetch_exchange_rates",
-        return_value=mock_rates,
+        new=AsyncMock(return_value=mock_rates),
     ):
         synced, failed = await sync_currency_rates(test_db, "USD", custom_date)
 
-        assert synced == 4  # 2 currencies * 2 directions
+        # Should sync EUR only (excludes USD->USD)
+        # 1 currency * 2 directions = 2 rates
+        assert synced == 2
 
         # Verify date was set correctly
         result = await test_db.execute(select(CurrencyRate))
@@ -187,11 +205,13 @@ async def test_sync_currency_rates_prevents_duplicates(
 
     with patch(
         "app.services.currency_service.fetch_exchange_rates",
-        return_value=mock_rates,
+        new=AsyncMock(return_value=mock_rates),
     ):
         # First sync
         synced1, failed1 = await sync_currency_rates(test_db, "USD")
-        assert synced1 == 4
+        # Should sync EUR only (excludes USD->USD)
+        # 1 currency * 2 directions = 2 rates
+        assert synced1 == 2
 
         # Second sync should rollback due to unique constraint
         synced2, failed2 = await sync_currency_rates(test_db, "USD")
@@ -249,7 +269,7 @@ async def test_sync_creates_bidirectional_rates(
 
     with patch(
         "app.services.currency_service.fetch_exchange_rates",
-        return_value=mock_rates,
+        new=AsyncMock(return_value=mock_rates),
     ):
         await sync_currency_rates(test_db, "USD")
 

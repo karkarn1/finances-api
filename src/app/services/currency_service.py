@@ -1,13 +1,18 @@
-"""Currency service for fetching exchange rates from frankfurter.app API.
+"""Currency service for fetching exchange rates using exchangerate-api.com.
 
-This module provides async functions to fetch exchange rates from frankfurter.app
+This module provides async functions to fetch exchange rates from exchangerate-api.com
 and store them in the database for historical tracking and offline access.
 
 Exchange Rate Source:
-- frankfurter.app API (https://www.frankfurter.app)
-- Provides current and historical foreign exchange rates from European Central Bank
-- Free, no authentication required
-- Reliable and well-maintained
+- exchangerate-api.com (https://www.exchangerate-api.com/)
+- Provides current foreign exchange rates from multiple sources
+- Free tier available with no authentication required
+- Reliable and actively maintained
+
+Limitations:
+- Free tier only supports current rates (no historical data)
+- Historical rate requests will use current rates as fallback
+- Rate limited to reasonable request frequency
 
 Caching Strategy:
 - Exchange rates stored in database by date
@@ -15,11 +20,12 @@ Caching Strategy:
 - Historical rates preserved for accurate multi-currency calculations
 """
 
+import asyncio
 import logging
-from datetime import date, datetime
+from datetime import date
 from decimal import Decimal
 
-import httpx
+import requests
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -28,66 +34,107 @@ from app.models.currency_rate import CurrencyRate
 
 logger = logging.getLogger(__name__)
 
-# Frankfurter API configuration
-_FRANKFURTER_API_BASE = "https://api.frankfurter.app"
-_REQUEST_TIMEOUT = 30.0
+# Exchange rate API configuration
+EXCHANGE_RATE_API_BASE = "https://api.exchangerate-api.com/v4/latest"
+REQUEST_TIMEOUT = 10  # seconds
 
 
-async def fetch_exchange_rates(base_currency: str) -> dict[str, float] | None:
-    """Fetch exchange rates for a base currency from frankfurter.app API.
+async def fetch_exchange_rates(
+    base_currency: str, rate_date: date | None = None
+) -> dict[str, float] | None:
+    """Fetch exchange rates for a base currency using exchangerate-api.com.
+
+    Fetches current rates from the API. Historical rates are not supported by the free API,
+    so if a date is provided, current rates are returned with a warning logged.
 
     Args:
         base_currency: ISO 4217 currency code (e.g., "USD", "EUR")
+        rate_date: Specific date to fetch rates for (default: None for current rates)
+                   NOTE: Historical rates not supported - current rates returned instead
 
     Returns:
         Dictionary mapping currency codes to exchange rates, or None on failure.
         Example: {"USD": 1.0, "EUR": 0.92, "CAD": 1.35}
 
     Example:
+        >>> # Get current rates
         >>> rates = await fetch_exchange_rates("USD")
         >>> print(rates["EUR"])
         0.92
-        >>> print(rates["CAD"])
-        1.35
+        >>> # Historical rates fallback to current rates
+        >>> from datetime import date
+        >>> rates = await fetch_exchange_rates("USD", date(2024, 1, 15))
+        >>> print(rates["EUR"])  # Returns current rate, not historical
+        0.92
 
     Note:
         Returns None on API failures (logs error). This ensures graceful
         degradation if the external service is unavailable.
-        Uses frankfurter.app API which is free and reliable.
+        Historical rates are NOT supported by the free API tier of exchangerate-api.com.
     """
+    base_currency_upper = base_currency.upper()
+
+    # Warn if historical rates requested (not supported by free API)
+    if rate_date:
+        logger.warning(
+            f"Historical rates not supported by exchangerate-api.com free tier. "
+            f"Returning current rates instead of rates for {rate_date}"
+        )
+
     try:
-        # frankfurter.app endpoint: /latest?from=USD
-        url = f"{_FRANKFURTER_API_BASE}/latest"
-        params = {"from": base_currency.upper()}
+        # Build API URL
+        url = f"{EXCHANGE_RATE_API_BASE}/{base_currency_upper}"
 
-        async with httpx.AsyncClient(timeout=_REQUEST_TIMEOUT) as client:
-            response = await client.get(url, params=params)
-            response.raise_for_status()
+        # Make synchronous request in executor to avoid blocking async event loop
+        loop = asyncio.get_running_loop()
+        response = await loop.run_in_executor(
+            None,
+            lambda: requests.get(url, timeout=REQUEST_TIMEOUT),
+        )
 
+        # Check for HTTP errors
+        response.raise_for_status()
+
+        # Parse JSON response
         data = response.json()
 
         # Validate response structure
         if "rates" not in data:
-            logger.error(f"Invalid API response: missing 'rates' field: {data}")
+            logger.error(
+                f"Invalid API response structure for {base_currency}: missing 'rates' key"
+            )
             return None
 
-        # Get rates and add base currency with rate 1.0
-        rates = data["rates"]
-        rates[base_currency.upper()] = 1.0
+        rates: dict[str, float] = data["rates"]
+
+        # Add base currency with rate 1.0 (API doesn't include it)
+        rates[base_currency_upper] = 1.0
 
         logger.info(
             f"Fetched {len(rates)} exchange rates for base currency {base_currency}"
         )
         return rates
 
-    except httpx.HTTPStatusError as e:
-        logger.error(f"HTTP error fetching exchange rates for {base_currency}: {e}")
+    except requests.exceptions.Timeout:
+        logger.error(
+            f"Timeout fetching exchange rates for {base_currency} from {url}"
+        )
         return None
-    except httpx.RequestError as e:
-        logger.error(f"Request error fetching exchange rates for {base_currency}: {e}")
+    except requests.exceptions.HTTPError as e:
+        logger.error(
+            f"HTTP error fetching exchange rates for {base_currency}: "
+            f"{e.response.status_code} - {e.response.text}"
+        )
         return None
-    except KeyError as e:
-        logger.error(f"Missing expected field in API response: {e}")
+    except requests.exceptions.RequestException as e:
+        logger.error(
+            f"Network error fetching exchange rates for {base_currency}: {e}"
+        )
+        return None
+    except ValueError as e:
+        logger.error(
+            f"Invalid JSON response for {base_currency}: {e}"
+        )
         return None
     except Exception as e:
         logger.error(
@@ -128,8 +175,8 @@ async def sync_currency_rates(
 
     logger.info(f"Starting rate sync for base currency {base_currency} on {sync_date}")
 
-    # Fetch rates from external API
-    rates = await fetch_exchange_rates(base_currency)
+    # Fetch rates from external API for the specified date
+    rates = await fetch_exchange_rates(base_currency, sync_date)
     if rates is None:
         logger.error(f"Failed to fetch rates for {base_currency}, aborting sync")
         return 0, 0
