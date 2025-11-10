@@ -16,6 +16,7 @@ from app.api.routes import (
     securities,
     users,
 )
+from app.core.cache import configure_yfinance_cache
 from app.core.config import settings
 from app.db.base import Base
 from app.db.session import engine
@@ -26,10 +27,15 @@ async def lifespan(app: FastAPI):
     """Application lifespan events."""
     # Startup
     print("🚀 Starting application...")
+
+    # Initialize database
     async with engine.begin() as conn:
         # Create tables (use Alembic in production)
         if settings.ENVIRONMENT == "development":
             await conn.run_sync(Base.metadata.create_all)
+
+    # Configure yfinance HTTP cache with Redis
+    configure_yfinance_cache()
 
     yield
 

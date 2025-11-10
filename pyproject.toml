@@ -18,6 +18,7 @@ dependencies = [
     "python-multipart>=0.0.17",
     "yfinance>=0.2.40",
     "pandas>=2.2.0",
+    "requests-cache[redis]>=1.2.0",
 ]
 
 [dependency-groups]

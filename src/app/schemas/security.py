@@ -69,34 +69,3 @@ class SyncResponse(BaseModel):
     security: SecurityResponse
     prices_synced: int
     message: str
-
-
-class BulkSyncResult(BaseModel):
-    """Result for a single security in bulk sync operation."""
-
-    symbol: str
-    status: str  # "success", "failed", "skipped"
-    message: str
-    prices_synced: int = 0
-    error: str | None = None
-
-
-class BulkSyncResponse(BaseModel):
-    """Schema for bulk sync operation response."""
-
-    total_requested: int
-    successfully_added: int
-    failed_additions: int
-    successfully_synced: int
-    failed_syncs: int
-    skipped: int
-    results: list[BulkSyncResult]
-    message: str
-
-
-class BulkSyncStartResponse(BaseModel):
-    """Schema for bulk sync start response (immediate return)."""
-
-    message: str = "Bulk sync job started"
-    total_securities: int
-    status: str = "running"

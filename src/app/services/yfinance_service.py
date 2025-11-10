@@ -1,4 +1,13 @@
-"""Service layer for interacting with yfinance API."""
+"""Service layer for interacting with yfinance API.
+
+Note:
+    HTTP caching is configured globally via requests-cache with Redis backend.
+    Cache configuration is in app.core.cache and initialized during app startup.
+    All HTTP requests made by yfinance are automatically cached based on URL patterns:
+    - Daily/weekly/monthly data: 24 hours
+    - Intraday data (1m, 1h): 15 minutes
+    - Security metadata: 6 hours
+"""
 
 import logging
 import uuid
