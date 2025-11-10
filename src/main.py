@@ -5,7 +5,16 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.routes import auth, health, securities, users
+from app.api.routes import (
+    account_values,
+    accounts,
+    auth,
+    financial_institutions,
+    health,
+    holdings,
+    securities,
+    users,
+)
 from app.core.config import settings
 from app.db.base import Base
 from app.db.session import engine
@@ -48,3 +57,19 @@ app.include_router(health.router, tags=["health"])
 app.include_router(auth.router, prefix="/api/v1/auth", tags=["auth"])
 app.include_router(users.router, prefix="/api/v1/users", tags=["users"])
 app.include_router(securities.router, prefix="/api/v1/securities", tags=["securities"])
+app.include_router(
+    financial_institutions.router,
+    prefix="/api/v1/financial-institutions",
+    tags=["financial-institutions"],
+)
+app.include_router(accounts.router, prefix="/api/v1/accounts", tags=["accounts"])
+app.include_router(
+    account_values.router,
+    prefix="/api/v1/accounts/{account_id}/values",
+    tags=["account-values"],
+)
+app.include_router(
+    holdings.router,
+    prefix="/api/v1/accounts/{account_id}/holdings",
+    tags=["holdings"],
+)

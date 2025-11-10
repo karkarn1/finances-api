@@ -13,6 +13,10 @@ from app.core.config import settings
 from app.models.user import User  # noqa: F401
 from app.models.security import Security  # noqa: F401
 from app.models.security_price import SecurityPrice  # noqa: F401
+from app.models.financial_institution import FinancialInstitution  # noqa: F401
+from app.models.account import Account  # noqa: F401
+from app.models.account_value import AccountValue  # noqa: F401
+from app.models.holding import Holding  # noqa: F401
 
 # this is the Alembic Config object
 config = context.config

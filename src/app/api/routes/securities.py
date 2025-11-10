@@ -1,19 +1,23 @@
 """Securities endpoints for tracking stocks and financial instruments."""
 
+import asyncio
 import logging
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import CurrentActiveUser
+from app.data.market_tickers import get_tickers
 from app.db.session import get_db
 from app.models.security import Security
 from app.models.security_price import SecurityPrice
 from app.schemas.security import (
+    BulkSyncResult,
+    BulkSyncStartResponse,
     PriceData,
     SecurityPricesResponse,
     SecurityResponse,
@@ -152,6 +156,9 @@ async def get_security(
     """
     Get security by symbol.
 
+    If the security doesn't exist in the database, automatically fetches it from
+    Yahoo Finance, creates the database record, and syncs historical price data.
+
     Args:
         symbol: Stock symbol (e.g., "AAPL", "MSFT")
         db: Database session
@@ -160,18 +167,97 @@ async def get_security(
         Security information including sync status
 
     Raises:
-        HTTPException: 404 if security not found
+        HTTPException:
+            - 404: Symbol not found in Yahoo Finance
+            - 503: Yahoo Finance API error
+
+    Example:
+        GET /api/v1/securities/AAPL
     """
+    symbol = symbol.upper()
+
+    # Try to get security from database
     result = await db.execute(
-        select(Security).where(Security.symbol == symbol.upper())
+        select(Security).where(Security.symbol == symbol)
     )
     security = result.scalar_one_or_none()
 
-    if not security:
+    # If security exists, return it
+    if security:
+        return security
+
+    # Security doesn't exist - fetch from Yahoo Finance and create it
+    logger.info(f"Security '{symbol}' not found in database, fetching from Yahoo Finance")
+
+    try:
+        # Fetch security info from yfinance
+        security_info = fetch_security_info(symbol)
+    except InvalidSymbolError as e:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Security with symbol '{symbol}' not found",
-        )
+            detail=str(e),
+        ) from e
+    except APIError as e:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Yahoo Finance API error: {str(e)}",
+        ) from e
+
+    # Create new security with is_syncing=True
+    security = Security(
+        id=uuid.uuid4(),
+        symbol=symbol,
+        is_syncing=True,
+        **security_info,
+    )
+    db.add(security)
+    await db.commit()
+    await db.refresh(security)
+
+    # Sync historical prices in background
+    try:
+        # Fetch daily historical data (max period)
+        logger.info(f"Fetching daily historical data for {symbol}")
+        try:
+            daily_df = fetch_historical_prices(symbol, period="max", interval="1d")
+            daily_prices = parse_yfinance_data(daily_df, security.id, "1d")
+
+            # Bulk insert daily prices
+            if daily_prices:
+                db.add_all(daily_prices)
+                await db.commit()
+                logger.info(f"Synced {len(daily_prices)} daily prices for {symbol}")
+        except (InvalidSymbolError, APIError) as e:
+            logger.warning(f"Could not fetch daily data for {symbol}: {e}")
+
+        # Fetch intraday minute data (last 7 days)
+        logger.info(f"Fetching intraday data for {symbol}")
+        try:
+            intraday_df = fetch_historical_prices(symbol, period="7d", interval="1m")
+            intraday_prices = parse_yfinance_data(intraday_df, security.id, "1m")
+
+            # Bulk insert intraday prices
+            if intraday_prices:
+                db.add_all(intraday_prices)
+                await db.commit()
+                logger.info(f"Synced {len(intraday_prices)} intraday prices for {symbol}")
+        except (InvalidSymbolError, APIError) as e:
+            logger.warning(f"Could not fetch intraday data for {symbol}: {e}")
+
+        # Update sync status
+        security.last_synced_at = datetime.now(UTC)
+        security.is_syncing = False
+        await db.commit()
+        await db.refresh(security)
+
+        logger.info(f"Successfully created and synced security '{symbol}'")
+
+    except Exception as e:
+        # Handle unexpected errors - mark sync as failed but still return the security
+        logger.error(f"Unexpected error syncing prices for {symbol}: {e}", exc_info=True)
+        security.is_syncing = False
+        await db.commit()
+        await db.refresh(security)
 
     return security
 
@@ -494,4 +580,311 @@ async def get_security_prices(
         actual_start=actual_start,
         actual_end=actual_end,
         data_completeness=data_completeness,
+    )
+
+
+async def _sync_single_security(
+    symbol: str,
+    db: AsyncSession,
+    batch_delay: float = 0.5,
+) -> BulkSyncResult:
+    """
+    Sync a single security (internal helper for bulk sync).
+
+    Args:
+        symbol: Stock symbol to sync
+        db: Database session
+        batch_delay: Delay between API calls to avoid rate limiting
+
+    Returns:
+        BulkSyncResult with sync status and details
+    """
+    try:
+        # Add delay to avoid rate limiting
+        if batch_delay > 0:
+            await asyncio.sleep(batch_delay)
+
+        # Check if security already exists
+        result = await db.execute(
+            select(Security).where(Security.symbol == symbol.upper())
+        )
+        existing_security = result.scalar_one_or_none()
+
+        if existing_security and existing_security.is_syncing:
+            return BulkSyncResult(
+                symbol=symbol,
+                status="skipped",
+                message="Sync already in progress",
+                prices_synced=0,
+            )
+
+        # Fetch security info from yfinance
+        logger.info(f"[BULK-SYNC] Fetching info for {symbol}")
+        try:
+            security_info = fetch_security_info(symbol)
+        except InvalidSymbolError as e:
+            logger.warning(f"[BULK-SYNC] Invalid symbol {symbol}: {e}")
+            return BulkSyncResult(
+                symbol=symbol,
+                status="failed",
+                message="Symbol not found",
+                prices_synced=0,
+                error=str(e),
+            )
+        except APIError as e:
+            logger.warning(f"[BULK-SYNC] API error for {symbol}: {e}")
+            return BulkSyncResult(
+                symbol=symbol,
+                status="failed",
+                message="API error",
+                prices_synced=0,
+                error=str(e),
+            )
+
+        # Create or update security
+        if existing_security:
+            # Update existing security
+            security = existing_security
+            security.is_syncing = True
+            await db.commit()
+            await db.refresh(security)
+
+            # Update fields
+            for field, value in security_info.items():
+                setattr(security, field, value)
+        else:
+            # Create new security
+            security = Security(
+                id=uuid.uuid4(),
+                symbol=symbol.upper(),
+                is_syncing=True,
+                **security_info,
+            )
+            db.add(security)
+            await db.commit()
+            await db.refresh(security)
+
+        total_prices_synced = 0
+
+        # Fetch and sync daily historical data
+        logger.info(f"[BULK-SYNC] Fetching daily data for {symbol}")
+        try:
+            daily_df = fetch_historical_prices(symbol, period="max", interval="1d")
+            daily_prices = parse_yfinance_data(daily_df, security.id, "1d")
+
+            if daily_prices:
+                db.add_all(daily_prices)
+                await db.commit()
+                total_prices_synced += len(daily_prices)
+                logger.info(
+                    f"[BULK-SYNC] Synced {len(daily_prices)} daily prices for {symbol}"
+                )
+        except (InvalidSymbolError, APIError) as e:
+            logger.warning(f"[BULK-SYNC] Could not fetch daily data for {symbol}: {e}")
+
+        # Fetch and sync intraday data (last 7 days)
+        logger.info(f"[BULK-SYNC] Fetching intraday data for {symbol}")
+        try:
+            intraday_df = fetch_historical_prices(symbol, period="7d", interval="1m")
+            intraday_prices = parse_yfinance_data(intraday_df, security.id, "1m")
+
+            if intraday_prices:
+                db.add_all(intraday_prices)
+                await db.commit()
+                total_prices_synced += len(intraday_prices)
+                logger.info(
+                    f"[BULK-SYNC] Synced {len(intraday_prices)} intraday prices for {symbol}"
+                )
+        except (InvalidSymbolError, APIError) as e:
+            logger.warning(
+                f"[BULK-SYNC] Could not fetch intraday data for {symbol}: {e}"
+            )
+
+        # Update sync status
+        security.last_synced_at = datetime.now(UTC)
+        security.is_syncing = False
+        await db.commit()
+
+        return BulkSyncResult(
+            symbol=symbol,
+            status="success",
+            message=f"Successfully synced {total_prices_synced} prices",
+            prices_synced=total_prices_synced,
+        )
+
+    except Exception as e:
+        # Handle unexpected errors
+        logger.error(f"[BULK-SYNC] Unexpected error syncing {symbol}: {e}", exc_info=True)
+
+        # Try to mark security as not syncing if it exists
+        try:
+            if existing_security:
+                existing_security.is_syncing = False
+                await db.commit()
+        except Exception:
+            pass
+
+        return BulkSyncResult(
+            symbol=symbol,
+            status="failed",
+            message="Unexpected error",
+            prices_synced=0,
+            error=str(e),
+        )
+
+
+async def run_bulk_sync(
+    tickers: list[str],
+    batch_size: int,
+    batch_delay: float,
+) -> None:
+    """
+    Run bulk sync in the background.
+
+    This function processes all securities and logs the results but doesn't
+    return anything since it runs as a background task.
+
+    Args:
+        tickers: List of stock symbols to sync
+        batch_size: Number of securities to sync concurrently
+        batch_delay: Delay between API calls in seconds
+    """
+    from app.db.session import AsyncSessionLocal
+
+    logger.info(
+        f"[BULK-SYNC] Starting bulk sync for {len(tickers)} securities "
+        f"(batch_size={batch_size}, batch_delay={batch_delay})"
+    )
+
+    # Track statistics
+    successfully_added = 0
+    failed_additions = 0
+    successfully_synced = 0
+    failed_syncs = 0
+    skipped = 0
+
+    # Create a new database session for the background task
+    async with AsyncSessionLocal() as db:
+        # Process securities in batches
+        for i in range(0, len(tickers), batch_size):
+            batch = tickers[i : i + batch_size]
+            logger.info(
+                f"[BULK-SYNC] Processing batch {i // batch_size + 1} "
+                f"({i + 1}-{min(i + batch_size, len(tickers))} of {len(tickers)})"
+            )
+
+            # Process batch concurrently
+            batch_tasks = [
+                _sync_single_security(symbol, db, batch_delay) for symbol in batch
+            ]
+            batch_results = await asyncio.gather(*batch_tasks, return_exceptions=True)
+
+            # Process results
+            for result_or_exc in batch_results:
+                if isinstance(result_or_exc, Exception):
+                    logger.error(
+                        f"[BULK-SYNC] Exception in batch: {result_or_exc}", exc_info=True
+                    )
+                    failed_additions += 1
+                    failed_syncs += 1
+                else:
+                    # Type narrowing: result_or_exc is BulkSyncResult here
+                    result: BulkSyncResult = result_or_exc
+
+                    if result.status == "success":
+                        successfully_added += 1
+                        if result.prices_synced > 0:
+                            successfully_synced += 1
+                    elif result.status == "skipped":
+                        skipped += 1
+                    else:  # failed
+                        failed_additions += 1
+                        failed_syncs += 1
+
+            # Log progress
+            logger.info(
+                f"[BULK-SYNC] Batch {i // batch_size + 1} completed. "
+                f"Success: {successfully_added}, Failed: {failed_additions}, "
+                f"Skipped: {skipped}"
+            )
+
+    # Generate summary message
+    message = (
+        f"Bulk sync completed: {successfully_added} successfully added, "
+        f"{successfully_synced} successfully synced, {failed_additions} failed, "
+        f"{skipped} skipped out of {len(tickers)} total"
+    )
+
+    logger.info(f"[BULK-SYNC] {message}")
+
+
+@router.post("/bulk-sync", response_model=BulkSyncStartResponse)
+async def bulk_sync_securities(
+    background_tasks: BackgroundTasks,
+    current_user: CurrentActiveUser,
+    batch_size: int = Query(
+        10,
+        description="Number of securities to sync concurrently",
+        ge=1,
+        le=50,
+    ),
+    batch_delay: float = Query(
+        0.5,
+        description="Delay between API calls in seconds to avoid rate limiting",
+        ge=0,
+        le=5,
+    ),
+) -> BulkSyncStartResponse:
+    """
+    Start bulk sync job for stocks from NASDAQ, NYSE, and TSX exchanges.
+
+    This endpoint starts a background job to sync a predefined list of major stocks from:
+    - NASDAQ: Technology-focused stocks (AAPL, MSFT, GOOGL, etc.)
+    - NYSE: Diverse stocks (JPM, V, MA, WMT, etc.)
+    - TSX: Canadian stocks (RY.TO, TD.TO, ENB.TO, etc.)
+
+    Only stocks are included - no indices or ETFs.
+
+    **Important Notes:**
+    - Returns immediately after starting the background job
+    - The sync job runs asynchronously in the background
+    - Progress and results are logged but not returned to the client
+    - Failed syncs are logged but don't stop the overall process
+    - Securities already being synced are skipped
+    - Rate limiting delays are applied between API calls
+
+    Args:
+        background_tasks: FastAPI background tasks manager
+        current_user: Authenticated user (required)
+        batch_size: Number of securities to sync concurrently (default: 10)
+        batch_delay: Delay between API calls in seconds (default: 0.5)
+
+    Returns:
+        Confirmation that the job has started with total securities count
+
+    Example:
+        POST /api/v1/securities/bulk-sync
+        POST /api/v1/securities/bulk-sync?batch_size=20&batch_delay=1.0
+    """
+    # Get list of all stocks to sync
+    tickers = get_tickers()
+
+    logger.info(
+        f"[BULK-SYNC] Queuing bulk sync job for {len(tickers)} securities "
+        f"(batch_size={batch_size}, batch_delay={batch_delay})"
+    )
+
+    # Add background task
+    background_tasks.add_task(
+        run_bulk_sync,
+        tickers=tickers,
+        batch_size=batch_size,
+        batch_delay=batch_delay,
+    )
+
+    # Return immediately
+    return BulkSyncStartResponse(
+        message="Bulk sync job started",
+        total_securities=len(tickers),
+        status="running",
     )

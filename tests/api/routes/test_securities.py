@@ -370,11 +370,19 @@ async def test_search_securities_limit(
 
 
 @pytest.mark.asyncio
-async def test_get_security_not_found(
-    client: AsyncClient, test_user: User, auth_headers: dict[str, str]
+async def test_get_security_not_found_invalid_symbol(
+    client: AsyncClient, test_user: User, auth_headers: dict[str, str], mocker
 ):
-    """Test getting a security that doesn't exist."""
-    response = await client.get("/api/v1/securities/AAPL")
+    """Test getting a security with invalid symbol (not in DB and not in yfinance)."""
+    from app.services.yfinance_service import InvalidSymbolError
+
+    # Mock yfinance to return symbol not found
+    mocker.patch(
+        "app.api.routes.securities.fetch_security_info",
+        side_effect=InvalidSymbolError("Symbol 'INVALID' not found in Yahoo Finance"),
+    )
+
+    response = await client.get("/api/v1/securities/INVALID")
     assert response.status_code == 404
     assert "not found" in response.json()["detail"].lower()
 
@@ -404,6 +412,101 @@ async def test_get_security_success(
     assert data["symbol"] == "AAPL"
     assert data["name"] == "Apple Inc."
     assert data["is_syncing"] is False
+
+
+@pytest.mark.asyncio
+async def test_get_security_auto_creates_when_not_in_db(
+    client: AsyncClient,
+    test_db: AsyncSession,
+    test_user: User,
+    auth_headers: dict[str, str],
+    mocker,
+):
+    """Test that endpoint auto-creates security when it doesn't exist in DB."""
+    # Mock yfinance functions
+    mocker.patch(
+        "app.api.routes.securities.fetch_security_info",
+        return_value=SAMPLE_YFINANCE_INFO,
+    )
+    mocker.patch(
+        "app.api.routes.securities.fetch_historical_prices",
+        return_value=create_sample_dataframe(),
+    )
+
+    # Security doesn't exist in DB yet
+    response = await client.get("/api/v1/securities/AAPL")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["symbol"] == "AAPL"
+    assert data["name"] == "Apple Inc."
+    assert data["exchange"] == "NASDAQ"
+    # Should be synced by now (sync completes within the request)
+    assert data["is_syncing"] is False
+    assert data["last_synced_at"] is not None
+
+    # Verify security was created in database
+    from sqlalchemy import select
+    result = await test_db.execute(
+        select(Security).where(Security.symbol == "AAPL")
+    )
+    security = result.scalar_one_or_none()
+    assert security is not None
+    assert security.symbol == "AAPL"
+
+
+@pytest.mark.asyncio
+async def test_get_security_auto_sync_yfinance_api_error(
+    client: AsyncClient,
+    test_user: User,
+    auth_headers: dict[str, str],
+    mocker,
+):
+    """Test that yfinance API errors are handled properly during auto-sync."""
+    from app.services.yfinance_service import APIError
+
+    # Mock yfinance to raise API error
+    mocker.patch(
+        "app.api.routes.securities.fetch_security_info",
+        side_effect=APIError("Yahoo Finance API unavailable"),
+    )
+
+    response = await client.get("/api/v1/securities/AAPL")
+    assert response.status_code == 503
+    assert "api error" in response.json()["detail"].lower()
+
+
+@pytest.mark.asyncio
+async def test_get_security_auto_sync_partial_failure(
+    client: AsyncClient,
+    test_db: AsyncSession,
+    test_user: User,
+    auth_headers: dict[str, str],
+    mocker,
+):
+    """Test that security is still created even if price sync partially fails."""
+    from app.services.yfinance_service import APIError
+
+    # Mock security info fetch to succeed
+    mocker.patch(
+        "app.api.routes.securities.fetch_security_info",
+        return_value=SAMPLE_YFINANCE_INFO,
+    )
+
+    # Mock price fetch to fail
+    mocker.patch(
+        "app.api.routes.securities.fetch_historical_prices",
+        side_effect=APIError("Failed to fetch prices"),
+    )
+
+    # Should still create the security metadata even if price sync fails
+    response = await client.get("/api/v1/securities/AAPL")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["symbol"] == "AAPL"
+    assert data["name"] == "Apple Inc."
+    assert data["is_syncing"] is False
+    # last_synced_at should be set even if prices failed
+    assert data["last_synced_at"] is not None
 
 
 @pytest.mark.asyncio
