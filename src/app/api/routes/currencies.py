@@ -207,9 +207,7 @@ async def update_currency(
 async def get_currency_rates(
     code: str,
     db: Annotated[AsyncSession, Depends(get_db)],
-    rate_date: date = Query(
-        default_factory=date.today, description="Date for exchange rates"
-    ),
+    rate_date: date = Query(default_factory=date.today, description="Date for exchange rates"),
 ) -> CurrencyRatesResponse:
     """Get exchange rates for a currency on a specific date.
 
@@ -245,9 +243,7 @@ async def get_currency_rates(
     result = await db.execute(
         select(CurrencyRate, Currency)
         .join(Currency, CurrencyRate.to_currency_id == Currency.id)
-        .where(
-            CurrencyRate.from_currency_id == currency.id, CurrencyRate.date == rate_date
-        )
+        .where(CurrencyRate.from_currency_id == currency.id, CurrencyRate.date == rate_date)
     )
 
     rates_data = {}
@@ -272,9 +268,7 @@ async def get_currency_rates(
 async def sync_rates(
     db: Annotated[AsyncSession, Depends(get_db)],
     base_currency: str = Query("USD", description="Base currency for sync"),
-    sync_date: date = Query(
-        default_factory=date.today, description="Date to sync rates for"
-    ),
+    sync_date: date = Query(default_factory=date.today, description="Date to sync rates for"),
 ) -> SyncRatesResponse:
     """Sync exchange rates from external API.
 
@@ -300,8 +294,7 @@ async def sync_rates(
     synced_count, failed_count = await sync_currency_rates(db, base_upper, sync_date)
 
     message = (
-        f"Synced {synced_count} rates for {base_upper} on {sync_date} "
-        f"({failed_count} failures)"
+        f"Synced {synced_count} rates for {base_upper} on {sync_date} ({failed_count} failures)"
     )
 
     return SyncRatesResponse(

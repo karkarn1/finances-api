@@ -11,7 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.core.deps import CurrentActiveUser
+from app.core.deps import CurrentActiveUser, verify_account_access
 from app.db.session import get_db
 from app.models.account import Account
 from app.models.holding import Holding
@@ -27,39 +27,6 @@ from app.services.yfinance_service import (
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
-
-
-async def verify_account_ownership(account_id: UUID, user_id: int, db: AsyncSession) -> Account:
-    """
-    Verify that the account exists and belongs to the user.
-
-    Args:
-        account_id: The account ID
-        user_id: The user ID
-        db: Database session
-
-    Returns:
-        The account if found and owned by user
-
-    Raises:
-        HTTPException: If account not found or access denied
-    """
-    result = await db.execute(select(Account).where(Account.id == account_id))
-    account = result.scalar_one_or_none()
-
-    if not account:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Account not found",
-        )
-
-    if account.user_id != user_id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Not authorized to access this account",
-        )
-
-    return account
 
 
 async def get_or_create_security(security_id_or_symbol: UUID | str, db: AsyncSession) -> Security:
@@ -188,8 +155,7 @@ async def get_or_create_security(security_id_or_symbol: UUID | str, db: AsyncSes
 
 @router.get("/", response_model=list[HoldingResponse])
 async def get_holdings(
-    account_id: UUID,
-    current_user: CurrentActiveUser,
+    account: Annotated[Account, Depends(verify_account_access)],
     db: Annotated[AsyncSession, Depends(get_db)],
     skip: int = 0,
     limit: int = 100,
@@ -198,8 +164,7 @@ async def get_holdings(
     Get all holdings for an account.
 
     Args:
-        account_id: The account ID
-        current_user: The authenticated user (from dependency)
+        account: The verified account (from dependency)
         db: Database session
         skip: Number of records to skip (pagination)
         limit: Maximum number of records to return
@@ -210,13 +175,10 @@ async def get_holdings(
     Raises:
         HTTPException: If account not found or access denied
     """
-    # Verify account ownership
-    await verify_account_ownership(account_id, current_user.id, db)
-
     result = await db.execute(
         select(Holding)
         .options(selectinload(Holding.security))
-        .where(Holding.account_id == account_id)
+        .where(Holding.account_id == account.id)
         .order_by(Holding.timestamp.desc())
         .offset(skip)
         .limit(limit)
@@ -226,9 +188,8 @@ async def get_holdings(
 
 @router.post("/", response_model=HoldingResponse, status_code=status.HTTP_201_CREATED)
 async def create_holding(
-    account_id: UUID,
+    account: Annotated[Account, Depends(verify_account_access)],
     holding: HoldingCreate,
-    current_user: CurrentActiveUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> Holding:
     """
@@ -239,9 +200,8 @@ async def create_holding(
     symbol string (for new securities to be auto-synced).
 
     Args:
-        account_id: The account ID
+        account: The verified account (from dependency)
         holding: Holding data (security_id can be UUID or symbol string)
-        current_user: The authenticated user (from dependency)
         db: Database session
 
     Returns:
@@ -262,9 +222,7 @@ async def create_holding(
             "average_price_per_share": 150.25
         }
     """
-    # Verify account ownership and validate it's an investment account
-    account = await verify_account_ownership(account_id, current_user.id, db)
-
+    # Validate it's an investment account
     if not account.is_investment_account:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -276,7 +234,7 @@ async def create_holding(
 
     # Create holding with the actual security UUID
     db_holding = Holding(
-        account_id=account_id,
+        account_id=account.id,
         security_id=security.id,  # Use the actual UUID from DB
         shares=holding.shares,
         average_price_per_share=holding.average_price_per_share,
@@ -294,18 +252,16 @@ async def create_holding(
 
 @router.get("/{holding_id}", response_model=HoldingResponse)
 async def get_holding(
-    account_id: UUID,
+    account: Annotated[Account, Depends(verify_account_access)],
     holding_id: UUID,
-    current_user: CurrentActiveUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> Holding:
     """
     Get a specific holding.
 
     Args:
-        account_id: The account ID
+        account: The verified account (from dependency)
         holding_id: The holding ID
-        current_user: The authenticated user (from dependency)
         db: Database session
 
     Returns:
@@ -314,13 +270,10 @@ async def get_holding(
     Raises:
         HTTPException: If account/holding not found or access denied
     """
-    # Verify account ownership
-    await verify_account_ownership(account_id, current_user.id, db)
-
     result = await db.execute(
         select(Holding)
         .options(selectinload(Holding.security))
-        .where(Holding.id == holding_id, Holding.account_id == account_id)
+        .where(Holding.id == holding_id, Holding.account_id == account.id)
     )
     holding = result.scalar_one_or_none()
 
@@ -335,20 +288,18 @@ async def get_holding(
 
 @router.put("/{holding_id}", response_model=HoldingResponse)
 async def update_holding(
-    account_id: UUID,
+    account: Annotated[Account, Depends(verify_account_access)],
     holding_id: UUID,
     holding_update: HoldingUpdate,
-    current_user: CurrentActiveUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> Holding:
     """
     Update a holding.
 
     Args:
-        account_id: The account ID
+        account: The verified account (from dependency)
         holding_id: The holding ID
         holding_update: Updated holding data
-        current_user: The authenticated user (from dependency)
         db: Database session
 
     Returns:
@@ -357,11 +308,8 @@ async def update_holding(
     Raises:
         HTTPException: If account/holding not found or access denied
     """
-    # Verify account ownership
-    await verify_account_ownership(account_id, current_user.id, db)
-
     result = await db.execute(
-        select(Holding).where(Holding.id == holding_id, Holding.account_id == account_id)
+        select(Holding).where(Holding.id == holding_id, Holding.account_id == account.id)
     )
     holding = result.scalar_one_or_none()
 
@@ -393,28 +341,23 @@ async def update_holding(
 
 @router.delete("/{holding_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_holding(
-    account_id: UUID,
+    account: Annotated[Account, Depends(verify_account_access)],
     holding_id: UUID,
-    current_user: CurrentActiveUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> None:
     """
     Delete a holding.
 
     Args:
-        account_id: The account ID
+        account: The verified account (from dependency)
         holding_id: The holding ID
-        current_user: The authenticated user (from dependency)
         db: Database session
 
     Raises:
         HTTPException: If account/holding not found or access denied
     """
-    # Verify account ownership
-    await verify_account_ownership(account_id, current_user.id, db)
-
     result = await db.execute(
-        select(Holding).where(Holding.id == holding_id, Holding.account_id == account_id)
+        select(Holding).where(Holding.id == holding_id, Holding.account_id == account.id)
     )
     holding = result.scalar_one_or_none()
 

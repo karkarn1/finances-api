@@ -3,15 +3,16 @@
 These tests verify dynamic fetching of securities from NASDAQ, NYSE, and TSX exchanges.
 """
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 from app.services.exchange_service import (
+    clear_cache,
+    fetch_all_exchange_tickers,
     fetch_nasdaq_tickers,
     fetch_nyse_tickers,
     fetch_tsx_tickers,
-    fetch_all_exchange_tickers,
-    clear_cache,
 )
 
 
@@ -178,10 +179,17 @@ async def test_fetch_all_exchange_tickers_with_mock():
     # Clear cache first
     await clear_cache()
 
-    with patch("app.services.exchange_service.fetch_nasdaq_tickers", new_callable=AsyncMock) as mock_nasdaq, \
-         patch("app.services.exchange_service.fetch_nyse_tickers", new_callable=AsyncMock) as mock_nyse, \
-         patch("app.services.exchange_service.fetch_tsx_tickers", new_callable=AsyncMock) as mock_tsx:
-
+    with (
+        patch(
+            "app.services.exchange_service.fetch_nasdaq_tickers", new_callable=AsyncMock
+        ) as mock_nasdaq,
+        patch(
+            "app.services.exchange_service.fetch_nyse_tickers", new_callable=AsyncMock
+        ) as mock_nyse,
+        patch(
+            "app.services.exchange_service.fetch_tsx_tickers", new_callable=AsyncMock
+        ) as mock_tsx,
+    ):
         mock_nasdaq.return_value = ["AAPL", "MSFT", "GOOGL"]
         mock_nyse.return_value = ["JPM", "BAC", "WFC"]
         mock_tsx.return_value = ["RY.TO", "TD.TO", "ENB.TO"]
@@ -210,10 +218,17 @@ async def test_fetch_all_exchange_tickers_partial_exchanges():
     # Clear cache first
     await clear_cache()
 
-    with patch("app.services.exchange_service.fetch_nasdaq_tickers", new_callable=AsyncMock) as mock_nasdaq, \
-         patch("app.services.exchange_service.fetch_nyse_tickers", new_callable=AsyncMock) as mock_nyse, \
-         patch("app.services.exchange_service.fetch_tsx_tickers", new_callable=AsyncMock) as mock_tsx:
-
+    with (
+        patch(
+            "app.services.exchange_service.fetch_nasdaq_tickers", new_callable=AsyncMock
+        ) as mock_nasdaq,
+        patch(
+            "app.services.exchange_service.fetch_nyse_tickers", new_callable=AsyncMock
+        ) as mock_nyse,
+        patch(
+            "app.services.exchange_service.fetch_tsx_tickers", new_callable=AsyncMock
+        ) as mock_tsx,
+    ):
         mock_nasdaq.return_value = ["AAPL", "MSFT"]
         mock_nyse.return_value = ["JPM", "BAC"]
 
@@ -235,10 +250,17 @@ async def test_fetch_all_exchange_tickers_caching():
     # Clear cache first
     await clear_cache()
 
-    with patch("app.services.exchange_service.fetch_nasdaq_tickers", new_callable=AsyncMock) as mock_nasdaq, \
-         patch("app.services.exchange_service.fetch_nyse_tickers", new_callable=AsyncMock) as mock_nyse, \
-         patch("app.services.exchange_service.fetch_tsx_tickers", new_callable=AsyncMock) as mock_tsx:
-
+    with (
+        patch(
+            "app.services.exchange_service.fetch_nasdaq_tickers", new_callable=AsyncMock
+        ) as mock_nasdaq,
+        patch(
+            "app.services.exchange_service.fetch_nyse_tickers", new_callable=AsyncMock
+        ) as mock_nyse,
+        patch(
+            "app.services.exchange_service.fetch_tsx_tickers", new_callable=AsyncMock
+        ) as mock_tsx,
+    ):
         mock_nasdaq.return_value = ["AAPL", "MSFT"]
         mock_nyse.return_value = ["JPM", "BAC"]
         mock_tsx.return_value = ["RY.TO", "TD.TO"]
@@ -265,10 +287,17 @@ async def test_clear_cache():
     await clear_cache()
 
     # Populate cache
-    with patch("app.services.exchange_service.fetch_nasdaq_tickers", new_callable=AsyncMock) as mock_nasdaq, \
-         patch("app.services.exchange_service.fetch_nyse_tickers", new_callable=AsyncMock) as mock_nyse, \
-         patch("app.services.exchange_service.fetch_tsx_tickers", new_callable=AsyncMock) as mock_tsx:
-
+    with (
+        patch(
+            "app.services.exchange_service.fetch_nasdaq_tickers", new_callable=AsyncMock
+        ) as mock_nasdaq,
+        patch(
+            "app.services.exchange_service.fetch_nyse_tickers", new_callable=AsyncMock
+        ) as mock_nyse,
+        patch(
+            "app.services.exchange_service.fetch_tsx_tickers", new_callable=AsyncMock
+        ) as mock_tsx,
+    ):
         mock_nasdaq.return_value = ["AAPL"]
         mock_nyse.return_value = ["JPM"]
         mock_tsx.return_value = ["RY.TO"]

@@ -106,9 +106,7 @@ async def test_list_users_with_pagination(
     client: AsyncClient, test_db: AsyncSession, superuser_auth_headers: dict[str, str]
 ):
     """Test listing users with skip and limit parameters."""
-    response = await client.get(
-        "/api/v1/users/?skip=0&limit=1", headers=superuser_auth_headers
-    )
+    response = await client.get("/api/v1/users/?skip=0&limit=1", headers=superuser_auth_headers)
 
     assert response.status_code == 200
     data = response.json()
@@ -278,9 +276,7 @@ async def test_delete_user_as_superuser(
     test_db: AsyncSession,
 ):
     """Test superuser can delete a user."""
-    response = await client.delete(
-        f"/api/v1/users/{test_user.id}", headers=superuser_auth_headers
-    )
+    response = await client.delete(f"/api/v1/users/{test_user.id}", headers=superuser_auth_headers)
 
     assert response.status_code == 204
 
@@ -291,9 +287,7 @@ async def test_delete_user_as_superuser(
 
 
 @pytest.mark.integration
-async def test_delete_nonexistent_user(
-    client: AsyncClient, superuser_auth_headers: dict[str, str]
-):
+async def test_delete_nonexistent_user(client: AsyncClient, superuser_auth_headers: dict[str, str]):
     """Test deleting nonexistent user returns 404."""
     response = await client.delete("/api/v1/users/99999", headers=superuser_auth_headers)
 

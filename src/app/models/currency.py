@@ -26,9 +26,7 @@ class Currency(Base, TimestampMixin):
 
     __tablename__ = "currencies"
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        primary_key=True, default=uuid.uuid4, index=True
-    )
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4, index=True)
     code: Mapped[str] = mapped_column(String(3), unique=True, index=True)
     name: Mapped[str] = mapped_column(String(100))
     symbol: Mapped[str] = mapped_column(String(10))

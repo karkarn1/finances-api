@@ -86,9 +86,7 @@ def fetch_security_info(symbol: str) -> dict[str, str | float | None]:
         raise APIError(f"Failed to fetch security info: {str(e)}") from e
 
 
-def fetch_historical_prices(
-    symbol: str, period: str = "max", interval: str = "1d"
-) -> pd.DataFrame:
+def fetch_historical_prices(symbol: str, period: str = "max", interval: str = "1d") -> pd.DataFrame:
     """
     Fetch historical price data from Yahoo Finance.
 
@@ -164,9 +162,7 @@ def fetch_price_range(
     except Exception as e:
         if isinstance(e, (InvalidSymbolError, APIError)):
             raise
-        logger.error(
-            f"Error fetching price range for {symbol} ({start} to {end}): {e}"
-        )
+        logger.error(f"Error fetching price range for {symbol} ({start} to {end}): {e}")
         raise APIError(f"Failed to fetch price range: {str(e)}") from e
 
 

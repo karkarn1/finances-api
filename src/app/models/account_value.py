@@ -15,9 +15,7 @@ class AccountValue(Base, TimestampMixin):
 
     __tablename__ = "account_values"
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        primary_key=True, default=uuid.uuid4, index=True
-    )
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4, index=True)
     account_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("accounts.id", ondelete="CASCADE"), index=True
     )
@@ -33,6 +31,4 @@ class AccountValue(Base, TimestampMixin):
     account: Mapped["Account"] = relationship("Account", back_populates="account_values")
 
     # Ensure unique balance entries per account per timestamp
-    __table_args__ = (
-        UniqueConstraint("account_id", "timestamp", name="uq_account_timestamp"),
-    )
+    __table_args__ = (UniqueConstraint("account_id", "timestamp", name="uq_account_timestamp"),)

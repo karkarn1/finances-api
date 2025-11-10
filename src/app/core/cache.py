@@ -12,7 +12,7 @@ from requests_cache.backends.redis import RedisCache
 from app.core.config import settings
 
 if TYPE_CHECKING:
-    from redis.client import Redis as RedisType
+    pass
 
 logger = logging.getLogger(__name__)
 
@@ -116,9 +116,7 @@ def configure_yfinance_cache() -> None:
             stale_if_error=True,  # Return stale cache on network errors
         )
 
-        logger.info(
-            "✓ Configured yfinance cache with Redis backend and pattern-based expiration"
-        )
+        logger.info("✓ Configured yfinance cache with Redis backend and pattern-based expiration")
         logger.info(f"  - Daily/weekly/monthly data: {CACHE_EXPIRATION['daily_data']}")
         logger.info(f"  - Intraday data: {CACHE_EXPIRATION['intraday_data']}")
         logger.info(f"  - Security metadata: {CACHE_EXPIRATION['security_info']}")

@@ -47,9 +47,7 @@ async def get_financial_institutions(
     return list(result.scalars().all())
 
 
-@router.post(
-    "/", response_model=FinancialInstitutionResponse, status_code=status.HTTP_201_CREATED
-)
+@router.post("/", response_model=FinancialInstitutionResponse, status_code=status.HTTP_201_CREATED)
 async def create_financial_institution(
     institution: FinancialInstitutionCreate,
     current_user: CurrentActiveUser,

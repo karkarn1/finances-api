@@ -100,9 +100,7 @@ async def fetch_exchange_rates(
 
         # Validate response structure
         if "rates" not in data:
-            logger.error(
-                f"Invalid API response structure for {base_currency}: missing 'rates' key"
-            )
+            logger.error(f"Invalid API response structure for {base_currency}: missing 'rates' key")
             return None
 
         rates: dict[str, float] = data["rates"]
@@ -110,15 +108,11 @@ async def fetch_exchange_rates(
         # Add base currency with rate 1.0 (API doesn't include it)
         rates[base_currency_upper] = 1.0
 
-        logger.info(
-            f"Fetched {len(rates)} exchange rates for base currency {base_currency}"
-        )
+        logger.info(f"Fetched {len(rates)} exchange rates for base currency {base_currency}")
         return rates
 
     except requests.exceptions.Timeout:
-        logger.error(
-            f"Timeout fetching exchange rates for {base_currency} from {url}"
-        )
+        logger.error(f"Timeout fetching exchange rates for {base_currency} from {url}")
         return None
     except requests.exceptions.HTTPError as e:
         logger.error(
@@ -127,19 +121,13 @@ async def fetch_exchange_rates(
         )
         return None
     except requests.exceptions.RequestException as e:
-        logger.error(
-            f"Network error fetching exchange rates for {base_currency}: {e}"
-        )
+        logger.error(f"Network error fetching exchange rates for {base_currency}: {e}")
         return None
     except ValueError as e:
-        logger.error(
-            f"Invalid JSON response for {base_currency}: {e}"
-        )
+        logger.error(f"Invalid JSON response for {base_currency}: {e}")
         return None
     except Exception as e:
-        logger.error(
-            f"Unexpected error fetching exchange rates for {base_currency}: {e}"
-        )
+        logger.error(f"Unexpected error fetching exchange rates for {base_currency}: {e}")
         return None
 
 
@@ -182,9 +170,7 @@ async def sync_currency_rates(
         return 0, 0
 
     # Get base currency from database
-    result = await db.execute(
-        select(Currency).where(Currency.code == base_currency.upper())
-    )
+    result = await db.execute(select(Currency).where(Currency.code == base_currency.upper()))
     base_curr = result.scalar_one_or_none()
 
     if base_curr is None:
@@ -300,9 +286,7 @@ async def get_exchange_rate(
     rate = result.scalar_one_or_none()
 
     if rate is None:
-        logger.warning(
-            f"Rate not found for {from_currency}->{to_currency} on {rate_date}"
-        )
+        logger.warning(f"Rate not found for {from_currency}->{to_currency} on {rate_date}")
         return None
 
     return rate.rate

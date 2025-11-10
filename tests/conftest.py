@@ -71,9 +71,7 @@ async def client(test_db: AsyncSession) -> AsyncGenerator[AsyncClient]:
 
     app.dependency_overrides[get_db] = override_get_db
 
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as test_client:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as test_client:
         yield test_client
 
     app.dependency_overrides.clear()
@@ -161,3 +159,53 @@ def superuser_auth_headers(superuser_token: str) -> dict[str, str]:
 def inactive_user_auth_headers(inactive_user_token: str) -> dict[str, str]:
     """Generate authorization headers with inactive user token."""
     return {"Authorization": f"Bearer {inactive_user_token}"}
+
+
+@pytest_asyncio.fixture(scope="function")
+async def other_user(test_db: AsyncSession) -> User:
+    """Create another test user (for testing access control)."""
+    user = User(
+        email="other@example.com",
+        username="otheruser",
+        hashed_password=get_password_hash("OtherPass123"),
+        is_active=True,
+        is_superuser=False,
+    )
+    test_db.add(user)
+    await test_db.commit()
+    await test_db.refresh(user)
+    return user
+
+
+@pytest_asyncio.fixture(scope="function")
+async def test_account(test_db: AsyncSession, test_user: User):
+    """Create a test account owned by test_user."""
+    from app.models.account import Account, AccountType
+
+    account = Account(
+        user_id=test_user.id,
+        name="Test Checking Account",
+        account_type=AccountType.CHECKING,
+        is_investment_account=False,
+    )
+    test_db.add(account)
+    await test_db.commit()
+    await test_db.refresh(account)
+    return account
+
+
+@pytest_asyncio.fixture(scope="function")
+async def other_user_account(test_db: AsyncSession, other_user: User):
+    """Create a test account owned by other_user."""
+    from app.models.account import Account, AccountType
+
+    account = Account(
+        user_id=other_user.id,
+        name="Other User Account",
+        account_type=AccountType.SAVINGS,
+        is_investment_account=False,
+    )
+    test_db.add(account)
+    await test_db.commit()
+    await test_db.refresh(account)
+    return account

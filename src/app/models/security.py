@@ -14,9 +14,7 @@ class Security(Base, TimestampMixin):
 
     __tablename__ = "securities"
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        primary_key=True, default=uuid.uuid4, index=True
-    )
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4, index=True)
     symbol: Mapped[str] = mapped_column(String(20), unique=True, index=True)
     name: Mapped[str] = mapped_column(String(255))
     exchange: Mapped[str | None] = mapped_column(String(50), nullable=True)
@@ -25,9 +23,7 @@ class Security(Base, TimestampMixin):
     sector: Mapped[str | None] = mapped_column(String(100), nullable=True)
     industry: Mapped[str | None] = mapped_column(String(100), nullable=True)
     market_cap: Mapped[float | None] = mapped_column(Float, nullable=True)
-    last_synced_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     is_syncing: Mapped[bool] = mapped_column(Boolean, default=False)
 
     # Relationship to price data

@@ -111,9 +111,7 @@ async def test_create_holding_with_symbol_auto_sync(
 
     # Verify security was auto-synced from Yahoo Finance
     security_id = data["security_id"]
-    result = await test_db.execute(
-        select(Security).where(Security.id == uuid.UUID(security_id))
-    )
+    result = await test_db.execute(select(Security).where(Security.id == uuid.UUID(security_id)))
     security = result.scalar_one_or_none()
 
     assert security is not None

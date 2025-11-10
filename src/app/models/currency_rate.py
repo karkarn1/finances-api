@@ -28,9 +28,7 @@ class CurrencyRate(Base, TimestampMixin):
 
     __tablename__ = "currency_rates"
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        primary_key=True, default=uuid.uuid4, index=True
-    )
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4, index=True)
     from_currency_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("currencies.id", ondelete="CASCADE"), index=True
     )

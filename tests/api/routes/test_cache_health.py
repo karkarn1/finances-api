@@ -1,9 +1,8 @@
 """Tests for cache health endpoint."""
 
-import pytest
 from unittest.mock import patch
 
-from app.core.cache import get_cache_stats
+import pytest
 
 
 @pytest.mark.integration

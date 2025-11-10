@@ -1,6 +1,5 @@
 """Tests for currency API endpoints."""
 
-import uuid
 from datetime import date, timedelta
 from decimal import Decimal
 
@@ -58,9 +57,7 @@ async def test_list_currencies_active_only(
 ) -> None:
     """Test listing only active currencies."""
     # Create inactive currency
-    inactive_currency = Currency(
-        code="XXX", name="Test Inactive", symbol="X", is_active=False
-    )
+    inactive_currency = Currency(code="XXX", name="Test Inactive", symbol="X", is_active=False)
     test_db.add(inactive_currency)
     await test_db.commit()
 
@@ -161,9 +158,7 @@ async def test_create_currency_invalid_code(client: AsyncClient) -> None:
 
 
 @pytest.mark.integration
-async def test_update_currency_success(
-    client: AsyncClient, test_db: AsyncSession
-) -> None:
+async def test_update_currency_success(client: AsyncClient, test_db: AsyncSession) -> None:
     """Test updating a currency."""
     # Create test currency
     currency = Currency(code="TST", name="Test Currency", symbol="T", is_active=True)
@@ -190,16 +185,12 @@ async def test_update_currency_success(
 @pytest.mark.integration
 async def test_update_currency_not_found(client: AsyncClient) -> None:
     """Test updating a non-existent currency."""
-    response = await client.put(
-        "/api/v1/currencies/ZZZ", json={"name": "Test", "symbol": "$"}
-    )
+    response = await client.put("/api/v1/currencies/ZZZ", json={"name": "Test", "symbol": "$"})
     assert response.status_code == 404
 
 
 @pytest.mark.integration
-async def test_update_currency_partial(
-    client: AsyncClient, test_db: AsyncSession
-) -> None:
+async def test_update_currency_partial(client: AsyncClient, test_db: AsyncSession) -> None:
     """Test partial update of currency."""
     # Create test currency
     currency = Currency(code="PAR", name="Partial Test", symbol="P", is_active=True)
@@ -299,9 +290,7 @@ async def test_sync_rates_success(
 
 
 @pytest.mark.integration
-async def test_sync_rates_invalid_base_currency(
-    client: AsyncClient, test_db: AsyncSession
-) -> None:
+async def test_sync_rates_invalid_base_currency(client: AsyncClient, test_db: AsyncSession) -> None:
     """Test syncing with invalid base currency."""
     # Create a test currency that won't be found by the API
     response = await client.post("/api/v1/currencies/sync-rates?base_currency=ZZZ")

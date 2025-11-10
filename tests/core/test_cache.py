@@ -1,7 +1,5 @@
 """Tests for cache configuration."""
 
-import pytest
-import requests_cache
 from unittest.mock import Mock, patch
 
 from app.core.cache import (
@@ -79,9 +77,7 @@ class TestCacheConfiguration:
 
     @patch("app.core.cache.get_redis_connection")
     @patch("app.core.cache.requests_cache.install_cache")
-    def test_configure_yfinance_cache_expiration_patterns(
-        self, mock_install, mock_redis_conn
-    ):
+    def test_configure_yfinance_cache_expiration_patterns(self, mock_install, mock_redis_conn):
         """Test that cache expiration patterns are configured correctly."""
         mock_redis_conn.return_value = Mock()
 
@@ -96,12 +92,13 @@ class TestCacheConfiguration:
         assert "*/v10/finance/quoteSummary/*" in urls_expire_after
 
         # Verify expiration times
-        assert urls_expire_after["*/v8/finance/chart/*interval=1d*"] == CACHE_EXPIRATION[
-            "daily_data"
-        ]
-        assert urls_expire_after["*/v8/finance/chart/*interval=1m*"] == CACHE_EXPIRATION[
-            "intraday_data"
-        ]
+        assert (
+            urls_expire_after["*/v8/finance/chart/*interval=1d*"] == CACHE_EXPIRATION["daily_data"]
+        )
+        assert (
+            urls_expire_after["*/v8/finance/chart/*interval=1m*"]
+            == CACHE_EXPIRATION["intraday_data"]
+        )
 
 
 class TestCacheOperations:

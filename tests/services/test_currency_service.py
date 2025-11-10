@@ -97,9 +97,7 @@ async def test_fetch_exchange_rates_mocked() -> None:
 async def test_fetch_exchange_rates_api_error() -> None:
     """Test handling API errors gracefully."""
     with patch("httpx.AsyncClient") as mock_client:
-        mock_client.return_value.__aenter__.return_value.get.side_effect = Exception(
-            "API Error"
-        )
+        mock_client.return_value.__aenter__.return_value.get.side_effect = Exception("API Error")
 
         rates = await fetch_exchange_rates("USD")
 

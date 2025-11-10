@@ -44,12 +44,8 @@ class Account(Base, TimestampMixin):
 
     __tablename__ = "accounts"
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        primary_key=True, default=uuid.uuid4, index=True
-    )
-    user_id: Mapped[int] = mapped_column(
-        ForeignKey("users.id", ondelete="CASCADE"), index=True
-    )
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4, index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     financial_institution_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("financial_institutions.id", ondelete="SET NULL"), nullable=True
     )

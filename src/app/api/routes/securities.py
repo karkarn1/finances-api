@@ -6,13 +6,14 @@ from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import CurrentActiveUser
 from app.db.session import get_db
 from app.models.security import Security
 from app.models.security_price import SecurityPrice
+from app.repositories.security import SecurityRepository
+from app.repositories.security_price import SecurityPriceRepository
 from app.schemas.security import (
     PriceData,
     SecurityPricesResponse,
@@ -22,9 +23,7 @@ from app.schemas.security import (
 from app.services.yfinance_service import (
     APIError,
     InvalidSymbolError,
-    fetch_historical_prices,
     fetch_security_info,
-    parse_yfinance_data,
 )
 
 router = APIRouter()
@@ -56,20 +55,9 @@ async def search_securities(
         GET /api/v1/securities/search?q=apple
         GET /api/v1/securities/search?q=AAPL&limit=10
     """
-    search_pattern = f"%{q}%"
-
-    # Search local database first
-    result = await db.execute(
-        select(Security)
-        .where(
-            (Security.symbol.ilike(search_pattern))
-            | (Security.name.ilike(search_pattern))
-        )
-        .order_by(Security.symbol)
-        .limit(limit)
-    )
-
-    db_securities = list(result.scalars().all())
+    # Search local database first using repository
+    security_repo = SecurityRepository(Security, db)
+    db_securities = await security_repo.search(q, limit=limit)
 
     # Convert DB results to response models
     response_securities: list[SecurityResponse] = [
@@ -97,9 +85,7 @@ async def search_securities(
         # Check if the query looks like a symbol (short, uppercase-friendly)
         # and we don't already have an exact match in DB
         query_upper = q.strip().upper()
-        has_exact_match = any(
-            sec.symbol.upper() == query_upper for sec in db_securities
-        )
+        has_exact_match = any(sec.symbol.upper() == query_upper for sec in db_securities)
 
         if not has_exact_match and len(query_upper) <= 10:
             # Try to fetch from yfinance
@@ -170,13 +156,15 @@ async def get_security(
     Example:
         GET /api/v1/securities/AAPL
     """
+    from app.services.security_service import (
+        get_security_by_symbol,
+        sync_security_data,
+    )
+
     symbol = symbol.upper()
 
     # Try to get security from database
-    result = await db.execute(
-        select(Security).where(Security.symbol == symbol)
-    )
-    security = result.scalar_one_or_none()
+    security = await get_security_by_symbol(db, symbol)
 
     # If security exists, return it
     if security:
@@ -186,8 +174,10 @@ async def get_security(
     logger.info(f"Security '{symbol}' not found in database, fetching from Yahoo Finance")
 
     try:
-        # Fetch security info from yfinance
-        security_info = fetch_security_info(symbol)
+        # Sync security data from yfinance (create + fetch prices)
+        security, _ = await sync_security_data(db, symbol)
+        return security
+
     except InvalidSymbolError as e:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -198,64 +188,13 @@ async def get_security(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=f"Yahoo Finance API error: {str(e)}",
         ) from e
-
-    # Create new security with is_syncing=True
-    security = Security(
-        id=uuid.uuid4(),
-        symbol=symbol,
-        is_syncing=True,
-        **security_info,
-    )
-    db.add(security)
-    await db.commit()
-    await db.refresh(security)
-
-    # Sync historical prices in background
-    try:
-        # Fetch daily historical data (max period)
-        logger.info(f"Fetching daily historical data for {symbol}")
-        try:
-            daily_df = fetch_historical_prices(symbol, period="max", interval="1d")
-            daily_prices = parse_yfinance_data(daily_df, security.id, "1d")
-
-            # Bulk insert daily prices
-            if daily_prices:
-                db.add_all(daily_prices)
-                await db.commit()
-                logger.info(f"Synced {len(daily_prices)} daily prices for {symbol}")
-        except (InvalidSymbolError, APIError) as e:
-            logger.warning(f"Could not fetch daily data for {symbol}: {e}")
-
-        # Fetch intraday minute data (last 7 days)
-        logger.info(f"Fetching intraday data for {symbol}")
-        try:
-            intraday_df = fetch_historical_prices(symbol, period="7d", interval="1m")
-            intraday_prices = parse_yfinance_data(intraday_df, security.id, "1m")
-
-            # Bulk insert intraday prices
-            if intraday_prices:
-                db.add_all(intraday_prices)
-                await db.commit()
-                logger.info(f"Synced {len(intraday_prices)} intraday prices for {symbol}")
-        except (InvalidSymbolError, APIError) as e:
-            logger.warning(f"Could not fetch intraday data for {symbol}: {e}")
-
-        # Update sync status
-        security.last_synced_at = datetime.now(UTC)
-        security.is_syncing = False
-        await db.commit()
-        await db.refresh(security)
-
-        logger.info(f"Successfully created and synced security '{symbol}'")
-
     except Exception as e:
-        # Handle unexpected errors - mark sync as failed but still return the security
-        logger.error(f"Unexpected error syncing prices for {symbol}: {e}", exc_info=True)
-        security.is_syncing = False
-        await db.commit()
-        await db.refresh(security)
-
-    return security
+        # Handle unexpected errors - log and return 500
+        logger.error(f"Unexpected error fetching security {symbol}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to fetch security: {str(e)}",
+        ) from e
 
 
 @router.post("/{symbol}/sync", response_model=SyncResponse)
@@ -287,95 +226,16 @@ async def sync_security(
     Example:
         POST /api/v1/securities/AAPL/sync
     """
+    from app.services.security_service import (
+        ConcurrentSyncError,
+        sync_security_data,
+    )
+
     symbol = symbol.upper()
 
-    # Check if security exists and if sync is already in progress
-    result = await db.execute(select(Security).where(Security.symbol == symbol))
-    security = result.scalar_one_or_none()
-
-    if security and security.is_syncing:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"Sync already in progress for '{symbol}'",
-        )
-
     try:
-        # Fetch security info from yfinance
-        logger.info(f"Fetching security info for {symbol}")
-        try:
-            security_info = fetch_security_info(symbol)
-        except InvalidSymbolError as e:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=str(e),
-            ) from e
-        except APIError as e:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail=f"Yahoo Finance API error: {str(e)}",
-            ) from e
-
-        # Create or update security
-        if security:
-            # Update existing security
-            security.is_syncing = True
-            await db.commit()
-            await db.refresh(security)
-
-            # Update fields
-            for field, value in security_info.items():
-                setattr(security, field, value)
-        else:
-            # Create new security
-            security = Security(
-                id=uuid.uuid4(),
-                symbol=symbol,
-                is_syncing=True,
-                **security_info,
-            )
-            db.add(security)
-            await db.commit()
-            await db.refresh(security)
-
-        total_prices_synced = 0
-
-        # Fetch daily historical data (max period)
-        logger.info(f"Fetching daily historical data for {symbol}")
-        try:
-            daily_df = fetch_historical_prices(symbol, period="max", interval="1d")
-            daily_prices = parse_yfinance_data(daily_df, security.id, "1d")
-
-            # Bulk insert daily prices
-            if daily_prices:
-                db.add_all(daily_prices)
-                await db.commit()
-                total_prices_synced += len(daily_prices)
-                logger.info(f"Synced {len(daily_prices)} daily prices for {symbol}")
-        except (InvalidSymbolError, APIError) as e:
-            logger.warning(f"Could not fetch daily data for {symbol}: {e}")
-
-        # Fetch today's intraday minute data (last 7 days available)
-        logger.info(f"Fetching intraday data for {symbol}")
-        try:
-            intraday_df = fetch_historical_prices(symbol, period="7d", interval="1m")
-            intraday_prices = parse_yfinance_data(intraday_df, security.id, "1m")
-
-            # Bulk insert intraday prices
-            if intraday_prices:
-                db.add_all(intraday_prices)
-                await db.commit()
-                total_prices_synced += len(intraday_prices)
-                logger.info(
-                    f"Synced {len(intraday_prices)} intraday prices for {symbol}"
-                )
-        except (InvalidSymbolError, APIError) as e:
-            logger.warning(f"Could not fetch intraday data for {symbol}: {e}")
-
-        # Update sync status
-        security.last_synced_at = datetime.now(UTC)
-        security.is_syncing = False
-        await db.commit()
-        await db.refresh(security)
+        # Sync security with concurrent check enabled
+        security, total_prices_synced = await sync_security_data(db, symbol, check_concurrent=True)
 
         return SyncResponse(
             security=security,
@@ -383,20 +243,24 @@ async def sync_security(
             message=f"Successfully synced {total_prices_synced} price records for {symbol}",
         )
 
-    except HTTPException:
-        # Re-raise HTTP exceptions
-        if security:
-            security.is_syncing = False
-            await db.commit()
-        raise
-
+    except ConcurrentSyncError as e:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(e),
+        ) from e
+    except InvalidSymbolError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(e),
+        ) from e
+    except APIError as e:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Yahoo Finance API error: {str(e)}",
+        ) from e
     except Exception as e:
         # Handle unexpected errors
         logger.error(f"Unexpected error syncing {symbol}: {e}", exc_info=True)
-        if security:
-            security.is_syncing = False
-            await db.commit()
-
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to sync security: {str(e)}",
@@ -438,11 +302,9 @@ async def get_security_prices(
         GET /api/v1/securities/AAPL/prices?start=2024-01-01T00:00:00Z
             &end=2024-12-31T23:59:59Z&interval=1d
     """
-    # Get security
-    result = await db.execute(
-        select(Security).where(Security.symbol == symbol.upper())
-    )
-    security = result.scalar_one_or_none()
+    # Get security using repository
+    security_repo = SecurityRepository(Security, db)
+    security = await security_repo.get_by_symbol(symbol.upper())
 
     if not security:
         raise HTTPException(
@@ -480,20 +342,14 @@ async def get_security_prices(
     expanded_start = requested_start - timedelta(days=search_buffer_days)
     expanded_end = requested_end + timedelta(days=search_buffer_days)
 
-    # Query prices with expanded range
-    query = (
-        select(SecurityPrice)
-        .where(
-            (SecurityPrice.security_id == security.id)
-            & (SecurityPrice.interval_type == interval)
-            & (SecurityPrice.timestamp >= expanded_start)
-            & (SecurityPrice.timestamp <= expanded_end)
-        )
-        .order_by(SecurityPrice.timestamp.asc())
+    # Query prices with expanded range using repository
+    price_repo = SecurityPriceRepository(SecurityPrice, db)
+    all_prices = await price_repo.get_by_security_and_date_range(
+        security.id,
+        expanded_start,
+        expanded_end,
+        interval=interval,
     )
-
-    result = await db.execute(query)
-    all_prices = list(result.scalars().all())
 
     # Filter to get prices closest to requested range
     # Prioritize data within requested range, then nearby data
@@ -502,11 +358,7 @@ async def get_security_prices(
         p
         for p in all_prices
         if requested_start
-        <= (
-            p.timestamp.replace(tzinfo=UTC)
-            if p.timestamp.tzinfo is None
-            else p.timestamp
-        )
+        <= (p.timestamp.replace(tzinfo=UTC) if p.timestamp.tzinfo is None else p.timestamp)
         <= requested_end
     ]
 

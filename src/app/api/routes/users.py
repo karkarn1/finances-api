@@ -3,12 +3,13 @@
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import CurrentActiveUser, CurrentSuperUser
+from app.core.security import get_password_hash
 from app.db.session import get_db
 from app.models.user import User
+from app.repositories.user import UserRepository
 from app.schemas.user import UserResponse, UserUpdate
 
 router = APIRouter()
@@ -33,8 +34,8 @@ async def get_users(
     Returns:
         List of users
     """
-    result = await db.execute(select(User).offset(skip).limit(limit))
-    return list(result.scalars().all())
+    user_repo = UserRepository(User, db)
+    return await user_repo.get_multi(skip=skip, limit=limit)
 
 
 @router.get("/{user_id}", response_model=UserResponse)
@@ -66,8 +67,8 @@ async def get_user(
             detail="Not authorized to access this user",
         )
 
-    result = await db.execute(select(User).where(User.id == user_id))
-    user = result.scalar_one_or_none()
+    user_repo = UserRepository(User, db)
+    user = await user_repo.get(user_id)
 
     if not user:
         raise HTTPException(
@@ -109,8 +110,8 @@ async def update_user(
             detail="Not authorized to update this user",
         )
 
-    result = await db.execute(select(User).where(User.id == user_id))
-    user = result.scalar_one_or_none()
+    user_repo = UserRepository(User, db)
+    user = await user_repo.get(user_id)
 
     if not user:
         raise HTTPException(
@@ -123,11 +124,7 @@ async def update_user(
 
     # Check for duplicate email if updating email
     if "email" in update_data and update_data["email"] != user.email:
-        result_email = await db.execute(
-            select(User).where(User.email == update_data["email"])
-        )
-        existing_user = result_email.scalar_one_or_none()
-        if existing_user:
+        if await user_repo.exists_by_email(update_data["email"]):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Email already registered",
@@ -135,11 +132,7 @@ async def update_user(
 
     # Check for duplicate username if updating username
     if "username" in update_data and update_data["username"] != user.username:
-        result_username = await db.execute(
-            select(User).where(User.username == update_data["username"])
-        )
-        existing_user = result_username.scalar_one_or_none()
-        if existing_user:
+        if await user_repo.exists_by_username(update_data["username"]):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Username already registered",
@@ -147,8 +140,6 @@ async def update_user(
 
     # Handle password update separately
     if "password" in update_data:
-        from app.core.security import get_password_hash
-
         user.hashed_password = get_password_hash(update_data.pop("password"))
 
     # Update other fields
@@ -178,8 +169,8 @@ async def delete_user(
     Raises:
         HTTPException: If user not found
     """
-    result = await db.execute(select(User).where(User.id == user_id))
-    user = result.scalar_one_or_none()
+    user_repo = UserRepository(User, db)
+    user = await user_repo.get(user_id)
 
     if not user:
         raise HTTPException(

@@ -28,9 +28,7 @@ class AccountValueCreate(AccountValueBase):
 
     @field_validator("cash_balance")
     @classmethod
-    def validate_cash_balance_for_investment(
-        cls, v: Decimal | None, info
-    ) -> Decimal | None:
+    def validate_cash_balance_for_investment(cls, v: Decimal | None, info) -> Decimal | None:
         """Validate that cash_balance is provided for investment accounts."""
         # Note: This validation will be enhanced in the route handler
         # where we have access to the account information

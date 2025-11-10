@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.core.deps import CurrentActiveUser
+from app.core.deps import CurrentActiveUser, verify_account_access
 from app.db.session import get_db
 from app.models.account import Account
 from app.models.account_value import AccountValue
@@ -42,10 +42,7 @@ async def get_accounts(
         List of accounts
     """
     result = await db.execute(
-        select(Account)
-        .where(Account.user_id == current_user.id)
-        .offset(skip)
-        .limit(limit)
+        select(Account).where(Account.user_id == current_user.id).offset(skip).limit(limit)
     )
     return list(result.scalars().all())
 
@@ -80,16 +77,14 @@ async def create_account(
 
 @router.get("/{account_id}", response_model=AccountWithBalance)
 async def get_account(
-    account_id: UUID,
-    current_user: CurrentActiveUser,
+    account: Annotated[Account, Depends(verify_account_access)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> dict:
     """
     Get a specific account with computed current balance.
 
     Args:
-        account_id: The ID of the account to retrieve
-        current_user: The authenticated user (from dependency)
+        account: The verified account (from dependency)
         db: Database session
 
     Returns:
@@ -98,30 +93,10 @@ async def get_account(
     Raises:
         HTTPException: If account not found or access denied
     """
-    result = await db.execute(
-        select(Account)
-        .options(selectinload(Account.account_values))
-        .where(Account.id == account_id)
-    )
-    account = result.scalar_one_or_none()
-
-    if not account:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Account not found",
-        )
-
-    # Verify ownership
-    if account.user_id != current_user.id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Not authorized to access this account",
-        )
-
     # Get most recent account value
     value_result = await db.execute(
         select(AccountValue)
-        .where(AccountValue.account_id == account_id)
+        .where(AccountValue.account_id == account.id)
         .order_by(AccountValue.timestamp.desc())
         .limit(1)
     )
@@ -147,18 +122,16 @@ async def get_account(
 
 @router.put("/{account_id}", response_model=AccountResponse)
 async def update_account(
-    account_id: UUID,
+    account: Annotated[Account, Depends(verify_account_access)],
     account_update: AccountUpdate,
-    current_user: CurrentActiveUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> Account:
     """
     Update an account.
 
     Args:
-        account_id: The ID of the account to update
+        account: The verified account (from dependency)
         account_update: Updated account data
-        current_user: The authenticated user (from dependency)
         db: Database session
 
     Returns:
@@ -167,22 +140,6 @@ async def update_account(
     Raises:
         HTTPException: If account not found or access denied
     """
-    result = await db.execute(select(Account).where(Account.id == account_id))
-    account = result.scalar_one_or_none()
-
-    if not account:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Account not found",
-        )
-
-    # Verify ownership
-    if account.user_id != current_user.id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Not authorized to update this account",
-        )
-
     # Update fields
     update_data = account_update.model_dump(exclude_unset=True)
     for field, value in update_data.items():
@@ -196,36 +153,18 @@ async def update_account(
 
 @router.delete("/{account_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_account(
-    account_id: UUID,
-    current_user: CurrentActiveUser,
+    account: Annotated[Account, Depends(verify_account_access)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> None:
     """
     Delete an account.
 
     Args:
-        account_id: The ID of the account to delete
-        current_user: The authenticated user (from dependency)
+        account: The verified account (from dependency)
         db: Database session
 
     Raises:
         HTTPException: If account not found or access denied
     """
-    result = await db.execute(select(Account).where(Account.id == account_id))
-    account = result.scalar_one_or_none()
-
-    if not account:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Account not found",
-        )
-
-    # Verify ownership
-    if account.user_id != current_user.id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Not authorized to delete this account",
-        )
-
     await db.delete(account)
     await db.commit()

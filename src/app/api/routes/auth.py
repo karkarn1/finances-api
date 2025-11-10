@@ -7,7 +7,6 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -20,6 +19,7 @@ from app.core.security import (
 )
 from app.db.session import get_db
 from app.models.user import User
+from app.repositories.user import UserRepository
 from app.schemas.auth import (
     ForgotPasswordRequest,
     MessageResponse,
@@ -29,6 +29,7 @@ from app.schemas.auth import (
     UserRegister,
 )
 from app.schemas.user import UserResponse
+from app.services import user_service
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -53,16 +54,14 @@ async def register(
         HTTPException: If username or email already exists
     """
     # Check if username already exists
-    result = await db.execute(select(User).where(User.username == user_data.username))
-    if result.scalar_one_or_none():
+    if await user_service.username_exists(db, user_data.username):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Username already registered",
         )
 
     # Check if email already exists
-    result = await db.execute(select(User).where(User.email == user_data.email))
-    if result.scalar_one_or_none():
+    if await user_service.email_exists(db, user_data.email):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Email already registered",
@@ -105,29 +104,8 @@ async def login(
     Raises:
         HTTPException: If credentials are invalid
     """
-    # Try to find user by username
-    result = await db.execute(select(User).where(User.username == form_data.username))
-    user = result.scalar_one_or_none()
-
-    # If not found by username, try email
-    if not user:
-        result = await db.execute(select(User).where(User.email == form_data.username))
-        user = result.scalar_one_or_none()
-
-    # Verify user exists and password is correct
-    if not user or not verify_password(form_data.password, user.hashed_password):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect username or password",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-
-    # Check if user is active
-    if not user.is_active:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Inactive user",
-        )
+    # Authenticate user
+    user = await user_service.authenticate_user(db, form_data.username, form_data.password)
 
     # Create access token
     access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
@@ -157,29 +135,8 @@ async def login_with_refresh(
     Raises:
         HTTPException: If credentials are invalid
     """
-    # Try to find user by username
-    result = await db.execute(select(User).where(User.username == form_data.username))
-    user = result.scalar_one_or_none()
-
-    # If not found by username, try email
-    if not user:
-        result = await db.execute(select(User).where(User.email == form_data.username))
-        user = result.scalar_one_or_none()
-
-    # Verify user exists and password is correct
-    if not user or not verify_password(form_data.password, user.hashed_password):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect username or password",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-
-    # Check if user is active
-    if not user.is_active:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Inactive user",
-        )
+    # Authenticate user
+    user = await user_service.authenticate_user(db, form_data.username, form_data.password)
 
     # Create tokens
     access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
@@ -243,8 +200,7 @@ async def forgot_password(
         the email doesn't exist in the database.
     """
     # Try to find user by email
-    result = await db.execute(select(User).where(User.email == request_data.email))
-    user = result.scalar_one_or_none()
+    user = await user_service.get_user_by_email(db, request_data.email)
 
     if user:
         # Generate secure random token (32 bytes = 43 chars base64)
@@ -264,17 +220,11 @@ async def forgot_password(
 
         # In development, log the plaintext token for testing
         if settings.ENVIRONMENT == "development":
-            logger.info(
-                f"Password reset token for {user.email}: {plaintext_token}"
-            )
-            logger.info(
-                f"Token expires at: {token_expires.isoformat()}"
-            )
+            logger.info(f"Password reset token for {user.email}: {plaintext_token}")
+            logger.info(f"Token expires at: {token_expires.isoformat()}")
 
     # Always return success (don't reveal if email exists)
-    return MessageResponse(
-        message="If the email exists, a password reset link has been sent."
-    )
+    return MessageResponse(message="If the email exists, a password reset link has been sent.")
 
 
 @router.post("/reset-password", response_model=MessageResponse)
@@ -295,11 +245,9 @@ async def reset_password(
     Raises:
         HTTPException: If token is invalid, expired, or not found
     """
-    # Get all users with non-null reset tokens
-    result = await db.execute(
-        select(User).where(User.reset_token.isnot(None))
-    )
-    users_with_tokens = result.scalars().all()
+    # Get all users with non-null reset tokens using repository
+    user_repo = UserRepository(User, db)
+    users_with_tokens = await user_repo.get_users_with_reset_tokens()
 
     # Find user by verifying the plaintext token against stored hashed tokens
     user = None

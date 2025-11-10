@@ -111,6 +111,7 @@ async def test_search_securities_by_symbol(
 
     # Mock yfinance to prevent real API calls
     from app.services.yfinance_service import InvalidSymbolError
+
     mocker.patch(
         "app.api.routes.securities.fetch_security_info",
         side_effect=InvalidSymbolError("Symbol not found"),
@@ -423,13 +424,13 @@ async def test_get_security_auto_creates_when_not_in_db(
     mocker,
 ):
     """Test that endpoint auto-creates security when it doesn't exist in DB."""
-    # Mock yfinance functions
+    # Mock yfinance service functions - use the import path in security_service
     mocker.patch(
-        "app.api.routes.securities.fetch_security_info",
+        "app.services.security_service.fetch_security_info",
         return_value=SAMPLE_YFINANCE_INFO,
     )
     mocker.patch(
-        "app.api.routes.securities.fetch_historical_prices",
+        "app.services.security_service.fetch_historical_prices",
         return_value=create_sample_dataframe(),
     )
 
@@ -446,9 +447,8 @@ async def test_get_security_auto_creates_when_not_in_db(
 
     # Verify security was created in database
     from sqlalchemy import select
-    result = await test_db.execute(
-        select(Security).where(Security.symbol == "AAPL")
-    )
+
+    result = await test_db.execute(select(Security).where(Security.symbol == "AAPL"))
     security = result.scalar_one_or_none()
     assert security is not None
     assert security.symbol == "AAPL"
@@ -464,9 +464,9 @@ async def test_get_security_auto_sync_yfinance_api_error(
     """Test that yfinance API errors are handled properly during auto-sync."""
     from app.services.yfinance_service import APIError
 
-    # Mock yfinance to raise API error
+    # Mock yfinance service to raise API error - use the import path in security_service
     mocker.patch(
-        "app.api.routes.securities.fetch_security_info",
+        "app.services.security_service.fetch_security_info",
         side_effect=APIError("Yahoo Finance API unavailable"),
     )
 
@@ -486,15 +486,15 @@ async def test_get_security_auto_sync_partial_failure(
     """Test that security is still created even if price sync partially fails."""
     from app.services.yfinance_service import APIError
 
-    # Mock security info fetch to succeed
+    # Mock security info fetch to succeed - use the import path in security_service
     mocker.patch(
-        "app.api.routes.securities.fetch_security_info",
+        "app.services.security_service.fetch_security_info",
         return_value=SAMPLE_YFINANCE_INFO,
     )
 
     # Mock price fetch to fail
     mocker.patch(
-        "app.api.routes.securities.fetch_historical_prices",
+        "app.services.security_service.fetch_historical_prices",
         side_effect=APIError("Failed to fetch prices"),
     )
 
@@ -525,19 +525,17 @@ async def test_sync_security_new(
     mocker,
 ):
     """Test syncing a new security."""
-    # Mock yfinance functions
+    # Mock yfinance service functions - use the import path in security_service
     mocker.patch(
-        "app.api.routes.securities.fetch_security_info",
+        "app.services.security_service.fetch_security_info",
         return_value=SAMPLE_YFINANCE_INFO,
     )
     mocker.patch(
-        "app.api.routes.securities.fetch_historical_prices",
+        "app.services.security_service.fetch_historical_prices",
         return_value=create_sample_dataframe(),
     )
 
-    response = await client.post(
-        "/api/v1/securities/AAPL/sync", headers=auth_headers
-    )
+    response = await client.post("/api/v1/securities/AAPL/sync", headers=auth_headers)
     assert response.status_code == 200
     data = response.json()
     assert data["security"]["symbol"] == "AAPL"
@@ -564,9 +562,7 @@ async def test_sync_security_already_syncing(
     test_db.add(security)
     await test_db.commit()
 
-    response = await client.post(
-        "/api/v1/securities/AAPL/sync", headers=auth_headers
-    )
+    response = await client.post("/api/v1/securities/AAPL/sync", headers=auth_headers)
     assert response.status_code == 409
     assert "already in progress" in response.json()["detail"].lower()
 
@@ -586,9 +582,7 @@ async def test_sync_security_invalid_symbol(
         side_effect=InvalidSymbolError("Symbol not found"),
     )
 
-    response = await client.post(
-        "/api/v1/securities/INVALID/sync", headers=auth_headers
-    )
+    response = await client.post("/api/v1/securities/INVALID/sync", headers=auth_headers)
     assert response.status_code == 404
     assert "not found" in response.json()["detail"].lower()
 
@@ -603,14 +597,13 @@ async def test_sync_security_api_error(
     """Test syncing when yfinance API fails."""
     from app.services.yfinance_service import APIError
 
+    # Mock yfinance service to raise API error - use the import path in security_service
     mocker.patch(
-        "app.api.routes.securities.fetch_security_info",
+        "app.services.security_service.fetch_security_info",
         side_effect=APIError("API unavailable"),
     )
 
-    response = await client.post(
-        "/api/v1/securities/AAPL/sync", headers=auth_headers
-    )
+    response = await client.post("/api/v1/securities/AAPL/sync", headers=auth_headers)
     assert response.status_code == 503
     assert "api error" in response.json()["detail"].lower()
 
@@ -620,9 +613,7 @@ async def test_get_prices_no_security(
     client: AsyncClient, test_user: User, auth_headers: dict[str, str]
 ):
     """Test getting prices for non-existent security."""
-    response = await client.get(
-        "/api/v1/securities/AAPL/prices", headers=auth_headers
-    )
+    response = await client.get("/api/v1/securities/AAPL/prices", headers=auth_headers)
     assert response.status_code == 404
     assert "not found" in response.json()["detail"].lower()
 
@@ -643,9 +634,7 @@ async def test_get_prices_no_data(
     test_db.add(security)
     await test_db.commit()
 
-    response = await client.get(
-        "/api/v1/securities/AAPL/prices", headers=auth_headers
-    )
+    response = await client.get("/api/v1/securities/AAPL/prices", headers=auth_headers)
     assert response.status_code == 200
     data = response.json()
     assert data["security"]["symbol"] == "AAPL"
@@ -679,7 +668,8 @@ async def test_get_prices_with_data(
         price = SecurityPrice(
             id=uuid.uuid4(),
             security_id=security.id,
-            timestamp=now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=4-i),
+            timestamp=now.replace(hour=0, minute=0, second=0, microsecond=0)
+            - timedelta(days=4 - i),
             open=150.0 + i,
             high=155.0 + i,
             low=149.0 + i,
@@ -690,9 +680,7 @@ async def test_get_prices_with_data(
         test_db.add(price)
     await test_db.commit()
 
-    response = await client.get(
-        "/api/v1/securities/AAPL/prices?interval=1d", headers=auth_headers
-    )
+    response = await client.get("/api/v1/securities/AAPL/prices?interval=1d", headers=auth_headers)
     assert response.status_code == 200
     data = response.json()
     assert data["security"]["symbol"] == "AAPL"
@@ -770,7 +758,8 @@ async def test_get_prices_different_intervals(
         price_daily = SecurityPrice(
             id=uuid.uuid4(),
             security_id=security.id,
-            timestamp=now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=2-i),
+            timestamp=now.replace(hour=0, minute=0, second=0, microsecond=0)
+            - timedelta(days=2 - i),
             open=150.0,
             high=155.0,
             low=149.0,
@@ -784,7 +773,7 @@ async def test_get_prices_different_intervals(
         price_minute = SecurityPrice(
             id=uuid.uuid4(),
             security_id=security.id,
-            timestamp=now - timedelta(hours=2-i),
+            timestamp=now - timedelta(hours=2 - i),
             open=150.0,
             high=155.0,
             low=149.0,
@@ -796,18 +785,14 @@ async def test_get_prices_different_intervals(
     await test_db.commit()
 
     # Query daily only
-    response = await client.get(
-        "/api/v1/securities/AAPL/prices?interval=1d", headers=auth_headers
-    )
+    response = await client.get("/api/v1/securities/AAPL/prices?interval=1d", headers=auth_headers)
     assert response.status_code == 200
     data = response.json()
     assert data["count"] == 3
     assert data["interval_type"] == "1d"
 
     # Query minute only
-    response = await client.get(
-        "/api/v1/securities/AAPL/prices?interval=1m", headers=auth_headers
-    )
+    response = await client.get("/api/v1/securities/AAPL/prices?interval=1m", headers=auth_headers)
     assert response.status_code == 200
     data = response.json()
     assert data["count"] == 3
@@ -830,9 +815,7 @@ async def test_get_prices_invalid_interval(
     test_db.add(security)
     await test_db.commit()
 
-    response = await client.get(
-        "/api/v1/securities/AAPL/prices?interval=5m", headers=auth_headers
-    )
+    response = await client.get("/api/v1/securities/AAPL/prices?interval=5m", headers=auth_headers)
     assert response.status_code == 422  # Validation error
 
 

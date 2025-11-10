@@ -14,9 +14,7 @@ class SecurityPrice(Base, TimestampMixin):
 
     __tablename__ = "security_prices"
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        primary_key=True, default=uuid.uuid4, index=True
-    )
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4, index=True)
     security_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("securities.id", ondelete="CASCADE"), index=True
     )
@@ -26,9 +24,7 @@ class SecurityPrice(Base, TimestampMixin):
     low: Mapped[float] = mapped_column(Float)
     close: Mapped[float] = mapped_column(Float)
     volume: Mapped[int] = mapped_column(BigInteger)
-    interval_type: Mapped[str] = mapped_column(
-        String(10)
-    )  # "1m", "1h", "1d", "1wk"
+    interval_type: Mapped[str] = mapped_column(String(10))  # "1m", "1h", "1d", "1wk"
 
     # Relationship back to security
     security: Mapped["Security"] = relationship("Security", back_populates="prices")
