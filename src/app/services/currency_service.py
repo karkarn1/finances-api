@@ -1,12 +1,13 @@
-"""Currency service for fetching exchange rates from external APIs.
+"""Currency service for fetching exchange rates from frankfurter.app API.
 
-This module provides async functions to fetch exchange rates from exchangerate-api.io
+This module provides async functions to fetch exchange rates from frankfurter.app
 and store them in the database for historical tracking and offline access.
 
-Exchange Rate API:
-- Free tier: https://api.exchangerate-api.io/v4/latest/{base_currency}
-- Returns rates for all supported currencies relative to base
-- Updated daily
+Exchange Rate Source:
+- frankfurter.app API (https://www.frankfurter.app)
+- Provides current and historical foreign exchange rates from European Central Bank
+- Free, no authentication required
+- Reliable and well-maintained
 
 Caching Strategy:
 - Exchange rates stored in database by date
@@ -27,13 +28,13 @@ from app.models.currency_rate import CurrencyRate
 
 logger = logging.getLogger(__name__)
 
-# Exchange rate API configuration
-_EXCHANGE_API_BASE = "https://api.exchangerate-api.io/v4/latest"
+# Frankfurter API configuration
+_FRANKFURTER_API_BASE = "https://api.frankfurter.app"
 _REQUEST_TIMEOUT = 30.0
 
 
 async def fetch_exchange_rates(base_currency: str) -> dict[str, float] | None:
-    """Fetch exchange rates for a base currency from external API.
+    """Fetch exchange rates for a base currency from frankfurter.app API.
 
     Args:
         base_currency: ISO 4217 currency code (e.g., "USD", "EUR")
@@ -52,12 +53,15 @@ async def fetch_exchange_rates(base_currency: str) -> dict[str, float] | None:
     Note:
         Returns None on API failures (logs error). This ensures graceful
         degradation if the external service is unavailable.
+        Uses frankfurter.app API which is free and reliable.
     """
     try:
-        url = f"{_EXCHANGE_API_BASE}/{base_currency.upper()}"
+        # frankfurter.app endpoint: /latest?from=USD
+        url = f"{_FRANKFURTER_API_BASE}/latest"
+        params = {"from": base_currency.upper()}
 
         async with httpx.AsyncClient(timeout=_REQUEST_TIMEOUT) as client:
-            response = await client.get(url)
+            response = await client.get(url, params=params)
             response.raise_for_status()
 
         data = response.json()
@@ -67,7 +71,10 @@ async def fetch_exchange_rates(base_currency: str) -> dict[str, float] | None:
             logger.error(f"Invalid API response: missing 'rates' field: {data}")
             return None
 
+        # Get rates and add base currency with rate 1.0
         rates = data["rates"]
+        rates[base_currency.upper()] = 1.0
+
         logger.info(
             f"Fetched {len(rates)} exchange rates for base currency {base_currency}"
         )
@@ -151,6 +158,11 @@ async def sync_currency_rates(
             continue
 
         target_curr = all_currencies[currency_code]
+
+        # Skip if base and target are the same currency
+        if base_curr.id == target_curr.id:
+            logger.debug(f"Skipping {currency_code} - same as base currency")
+            continue
 
         try:
             # Create rate from base to target currency
