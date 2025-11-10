@@ -1,6 +1,6 @@
 """Unit tests for security utilities."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import jwt
 import pytest
@@ -114,8 +114,8 @@ def test_decode_token_contains_expiration():
     decoded = decode_token(token)
 
     exp_timestamp = decoded["exp"]
-    exp_datetime = datetime.fromtimestamp(exp_timestamp, tz=timezone.utc)
-    now = datetime.now(timezone.utc)
+    exp_datetime = datetime.fromtimestamp(exp_timestamp, tz=UTC)
+    now = datetime.now(UTC)
 
     # Expiration should be in the future
     assert exp_datetime > now
@@ -171,8 +171,8 @@ def test_token_includes_issued_at_time():
 
     assert "iat" in decoded
     iat_timestamp = decoded["iat"]
-    iat_datetime = datetime.fromtimestamp(iat_timestamp, tz=timezone.utc)
-    now = datetime.now(timezone.utc)
+    iat_datetime = datetime.fromtimestamp(iat_timestamp, tz=UTC)
+    now = datetime.now(UTC)
 
     # Issued time should be recent (within last minute)
     time_diff = (now - iat_datetime).total_seconds()

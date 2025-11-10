@@ -1,13 +1,12 @@
 """Security utilities for authentication and authorization."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import jwt
 from pwdlib import PasswordHash
 
 from app.core.config import settings
-
 
 # Initialize password hasher with Argon2 (recommended algorithm)
 password_hash = PasswordHash.recommended()
@@ -54,13 +53,13 @@ def create_access_token(data: dict[str, Any], expires_delta: timedelta | None = 
     to_encode = data.copy()
 
     if expires_delta:
-        expire = datetime.now(timezone.utc) + expires_delta
+        expire = datetime.now(UTC) + expires_delta
     else:
-        expire = datetime.now(timezone.utc) + timedelta(
+        expire = datetime.now(UTC) + timedelta(
             minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES
         )
 
-    to_encode.update({"exp": expire, "iat": datetime.now(timezone.utc)})
+    to_encode.update({"exp": expire, "iat": datetime.now(UTC)})
     encoded_jwt = jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
 
     return encoded_jwt
@@ -77,9 +76,9 @@ def create_refresh_token(data: dict[str, Any]) -> str:
         The encoded JWT refresh token
     """
     to_encode = data.copy()
-    expire = datetime.now(timezone.utc) + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
+    expire = datetime.now(UTC) + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
 
-    to_encode.update({"exp": expire, "iat": datetime.now(timezone.utc), "type": "refresh"})
+    to_encode.update({"exp": expire, "iat": datetime.now(UTC), "type": "refresh"})
     encoded_jwt = jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
 
     return encoded_jwt

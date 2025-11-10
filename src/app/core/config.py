@@ -1,7 +1,7 @@
 """Application configuration using Pydantic Settings."""
 
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from typing import List
 
 
 class Settings(BaseSettings):
@@ -45,10 +45,10 @@ class Settings(BaseSettings):
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
 
     # CORS
-    CORS_ORIGINS: List[str] = ["http://localhost:3000"]
+    CORS_ORIGINS: list[str] = ["http://localhost:3000", "http://localhost:5173"]
     CORS_CREDENTIALS: bool = True
-    CORS_METHODS: List[str] = ["*"]
-    CORS_HEADERS: List[str] = ["*"]
+    CORS_METHODS: list[str] = ["*"]
+    CORS_HEADERS: list[str] = ["*"]
 
     # Rate Limiting
     RATE_LIMIT_ENABLED: bool = True

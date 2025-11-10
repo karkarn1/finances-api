@@ -1,6 +1,8 @@
 """Authentication routes."""
 
-from datetime import timedelta
+import logging
+import secrets
+from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -18,10 +20,18 @@ from app.core.security import (
 )
 from app.db.session import get_db
 from app.models.user import User
-from app.schemas.auth import Token, TokenPair, UserRegister
+from app.schemas.auth import (
+    ForgotPasswordRequest,
+    MessageResponse,
+    ResetPasswordRequest,
+    Token,
+    TokenPair,
+    UserRegister,
+)
 from app.schemas.user import UserResponse
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 @router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
@@ -208,3 +218,127 @@ async def test_token(current_user: CurrentActiveUser) -> User:
         The current user
     """
     return current_user
+
+
+@router.post("/forgot-password", response_model=MessageResponse)
+async def forgot_password(
+    request_data: ForgotPasswordRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> MessageResponse:
+    """
+    Request a password reset token.
+
+    Generates a secure token and stores it hashed in the database.
+    Token expires in 30 minutes.
+
+    Args:
+        request_data: Email address for password reset
+        db: Database session
+
+    Returns:
+        Success message (always returns 200 for security)
+
+    Note:
+        For security, this endpoint always returns success even if
+        the email doesn't exist in the database.
+    """
+    # Try to find user by email
+    result = await db.execute(select(User).where(User.email == request_data.email))
+    user = result.scalar_one_or_none()
+
+    if user:
+        # Generate secure random token (32 bytes = 43 chars base64)
+        plaintext_token = secrets.token_urlsafe(32)
+
+        # Hash the token before storing (same security as passwords)
+        hashed_token = get_password_hash(plaintext_token)
+
+        # Set token expiration (30 minutes from now)
+        token_expires = datetime.now(UTC) + timedelta(minutes=30)
+
+        # Update user with hashed token and expiration
+        user.reset_token = hashed_token
+        user.reset_token_expires = token_expires
+
+        await db.commit()
+
+        # In development, log the plaintext token for testing
+        if settings.ENVIRONMENT == "development":
+            logger.info(
+                f"Password reset token for {user.email}: {plaintext_token}"
+            )
+            logger.info(
+                f"Token expires at: {token_expires.isoformat()}"
+            )
+
+    # Always return success (don't reveal if email exists)
+    return MessageResponse(
+        message="If the email exists, a password reset link has been sent."
+    )
+
+
+@router.post("/reset-password", response_model=MessageResponse)
+async def reset_password(
+    request_data: ResetPasswordRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> MessageResponse:
+    """
+    Reset password using a valid reset token.
+
+    Args:
+        request_data: Reset token and new password
+        db: Database session
+
+    Returns:
+        Success message
+
+    Raises:
+        HTTPException: If token is invalid, expired, or not found
+    """
+    # Get all users with non-null reset tokens
+    result = await db.execute(
+        select(User).where(User.reset_token.isnot(None))
+    )
+    users_with_tokens = result.scalars().all()
+
+    # Find user by verifying the plaintext token against stored hashed tokens
+    user = None
+    for candidate_user in users_with_tokens:
+        if candidate_user.reset_token and verify_password(
+            request_data.token, candidate_user.reset_token
+        ):
+            user = candidate_user
+            break
+
+    # Verify token exists and hasn't expired
+    if not user or not user.reset_token_expires:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired reset token",
+        )
+
+    # Check if token has expired
+    if user.reset_token_expires < datetime.now(UTC):
+        # Clear expired token
+        user.reset_token = None
+        user.reset_token_expires = None
+        await db.commit()
+
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Reset token has expired",
+        )
+
+    # Hash the new password
+    new_hashed_password = get_password_hash(request_data.new_password)
+
+    # Update user password and clear reset token (single-use)
+    user.hashed_password = new_hashed_password
+    user.reset_token = None
+    user.reset_token_expires = None
+
+    await db.commit()
+
+    logger.info(f"Password successfully reset for user: {user.email}")
+
+    return MessageResponse(message="Password has been reset successfully")

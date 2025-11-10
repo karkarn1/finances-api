@@ -2,7 +2,6 @@
 
 import asyncio
 from collections.abc import AsyncGenerator
-from typing import Any
 
 import pytest
 import pytest_asyncio
@@ -14,7 +13,6 @@ from app.db.base import Base
 from app.db.session import get_db
 from app.models.user import User
 from main import app
-
 
 # Test database URL (SQLite in-memory for fast tests)
 TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
@@ -51,7 +49,7 @@ async def test_engine():
 
 
 @pytest_asyncio.fixture(scope="function")
-async def test_db(test_engine) -> AsyncGenerator[AsyncSession, None]:
+async def test_db(test_engine) -> AsyncGenerator[AsyncSession]:
     """Create a test database session."""
     async_session_maker = async_sessionmaker(
         test_engine,
@@ -65,10 +63,10 @@ async def test_db(test_engine) -> AsyncGenerator[AsyncSession, None]:
 
 
 @pytest_asyncio.fixture(scope="function")
-async def client(test_db: AsyncSession) -> AsyncGenerator[AsyncClient, None]:
+async def client(test_db: AsyncSession) -> AsyncGenerator[AsyncClient]:
     """Create a test client with database override."""
 
-    async def override_get_db() -> AsyncGenerator[AsyncSession, None]:
+    async def override_get_db() -> AsyncGenerator[AsyncSession]:
         yield test_db
 
     app.dependency_overrides[get_db] = override_get_db

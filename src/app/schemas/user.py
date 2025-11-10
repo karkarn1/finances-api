@@ -1,7 +1,8 @@
 """User schemas."""
 
-from pydantic import BaseModel, EmailStr, Field
 from datetime import datetime
+
+from pydantic import BaseModel, EmailStr, Field
 
 
 class UserBase(BaseModel):

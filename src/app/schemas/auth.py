@@ -43,3 +43,24 @@ class TokenPair(BaseModel):
     access_token: str
     refresh_token: str
     token_type: str = "bearer"
+
+
+class ForgotPasswordRequest(BaseModel):
+    """Schema for forgot password request."""
+
+    email: EmailStr
+
+
+class ResetPasswordRequest(BaseModel):
+    """Schema for reset password request."""
+
+    token: str = Field(..., min_length=1, description="Password reset token")
+    new_password: str = Field(
+        ..., min_length=8, description="New password must be at least 8 characters"
+    )
+
+
+class MessageResponse(BaseModel):
+    """Generic message response schema."""
+
+    message: str
