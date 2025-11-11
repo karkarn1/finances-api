@@ -5,11 +5,13 @@ across different route handlers. Now uses UserRepository for all data access.
 """
 
 import logging
+from datetime import timedelta
 
 from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.security import verify_password
+from app.core.config import settings
+from app.core.security import create_access_token, create_refresh_token, verify_password
 from app.models.user import User
 from app.repositories.user import UserRepository
 
@@ -159,3 +161,61 @@ async def authenticate_user(
         )
 
     return user
+
+
+async def create_user_tokens(
+    db: AsyncSession,
+    username_or_email: str,
+    password: str,
+    *,
+    include_refresh: bool = False,
+) -> dict[str, str]:
+    """Authenticate user and create JWT tokens.
+
+    Centralizes token creation logic to eliminate duplication between
+    login endpoints. Handles both single token (access only) and dual
+    token (access + refresh) scenarios.
+
+    Args:
+        db: Async database session
+        username_or_email: Username or email address
+        password: Plain text password to verify
+        include_refresh: Whether to include refresh token in response
+
+    Returns:
+        Dictionary containing:
+        - access_token: JWT access token
+        - refresh_token: JWT refresh token (only if include_refresh=True)
+
+    Raises:
+        HTTPException: 401 if credentials invalid, 400 if user inactive
+
+    Example:
+        >>> # Get access token only
+        >>> tokens = await create_user_tokens(db, "john@example.com", "secret123")
+        >>> print(tokens['access_token'])
+
+        >>> # Get both access and refresh tokens
+        >>> tokens = await create_user_tokens(
+        ...     db, "john@example.com", "secret123", include_refresh=True
+        ... )
+        >>> print(tokens['refresh_token'])
+    """
+    # Authenticate user (will raise HTTPException if invalid)
+    user = await authenticate_user(db, username_or_email, password)
+
+    # Create access token with configured expiration
+    access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"sub": user.username},
+        expires_delta=access_token_expires,
+    )
+
+    tokens = {"access_token": access_token}
+
+    # Create refresh token if requested
+    if include_refresh:
+        refresh_token = create_refresh_token(data={"sub": user.username})
+        tokens["refresh_token"] = refresh_token
+
+    return tokens

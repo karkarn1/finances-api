@@ -10,6 +10,7 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         case_sensitive=True,
+        extra="ignore",  # Ignore extra environment variables not defined in Settings
     )
 
     # Application
@@ -44,20 +45,46 @@ class Settings(BaseSettings):
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
 
     # CORS
-    CORS_ORIGINS: list[str] = [
-        "http://localhost:3000",
-        "http://localhost:5173",
-        "http://localhost:5174",
-        "http://localhost:5175",
-    ]
+    CORS_ORIGINS: list[str] = ["*"]
     CORS_CREDENTIALS: bool = True
     CORS_METHODS: list[str] = ["*"]
     CORS_HEADERS: list[str] = ["*"]
 
     # Rate Limiting
     RATE_LIMIT_ENABLED: bool = True
-    RATE_LIMIT_REQUESTS: int = 100
-    RATE_LIMIT_PERIOD: int = 60
+    DEFAULT_RATE_LIMIT: str = "100/minute"  # General endpoints
+    AUTH_RATE_LIMIT: str = "5/minute"  # Login/register endpoints
+    SYNC_RATE_LIMIT: str = "10/minute"  # Expensive sync operations
+
+    # Logging Configuration
+    LOGGING_CONFIG: dict = {
+        "version": 1,
+        "disable_existing_loggers": False,
+        "formatters": {
+            "default": {
+                "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+                "datefmt": "%Y-%m-%d %H:%M:%S",
+            },
+        },
+        "handlers": {
+            "console": {
+                "class": "logging.StreamHandler",
+                "formatter": "default",
+                "stream": "ext://sys.stdout",
+            },
+        },
+        "root": {
+            "level": "INFO",
+            "handlers": ["console"],
+        },
+        "loggers": {
+            "app": {
+                "level": "INFO",
+                "handlers": ["console"],
+                "propagate": False,
+            },
+        },
+    }
 
 
 settings = Settings()

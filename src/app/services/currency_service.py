@@ -1,18 +1,19 @@
-"""Currency service for fetching exchange rates using exchangerate-api.com.
+"""Currency service for fetching exchange rates using yfinance.
 
-This module provides async functions to fetch exchange rates from exchangerate-api.com
-and store them in the database for historical tracking and offline access.
+This module provides async functions to fetch exchange rates from Yahoo Finance
+via yfinance and store them in the database for historical tracking and offline access.
 
 Exchange Rate Source:
-- exchangerate-api.com (https://www.exchangerate-api.com/)
-- Provides current foreign exchange rates from multiple sources
-- Free tier available with no authentication required
-- Reliable and actively maintained
+- yfinance (https://github.com/ranaroussi/yfinance)
+- Provides current and historical foreign exchange rates from Yahoo Finance
+- Free, no authentication required
+- Supports historical data for accurate backtesting and analysis
 
-Limitations:
-- Free tier only supports current rates (no historical data)
-- Historical rate requests will use current rates as fallback
-- Rate limited to reasonable request frequency
+Features:
+- Current exchange rates via yfinance Ticker API
+- Historical rates support (unlike exchangerate-api.com)
+- Currency pair format: "USDEUR=X" for USD to EUR rate
+- Reliable data source maintained by Yahoo Finance
 
 Caching Strategy:
 - Exchange rates stored in database by date
@@ -22,10 +23,10 @@ Caching Strategy:
 
 import asyncio
 import logging
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
-import requests
+import yfinance as yf  # type: ignore[import-untyped]
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -34,23 +35,40 @@ from app.models.currency_rate import CurrencyRate
 
 logger = logging.getLogger(__name__)
 
-# Exchange rate API configuration
-EXCHANGE_RATE_API_BASE = "https://api.exchangerate-api.com/v4/latest"
-REQUEST_TIMEOUT = 10  # seconds
+# Major currency codes supported by Yahoo Finance
+# Format: "{BASE}{TARGET}=X" (e.g., "USDEUR=X" for USD to EUR rate)
+MAJOR_CURRENCIES = [
+    "USD",
+    "EUR",
+    "GBP",
+    "JPY",
+    "CAD",
+    "AUD",
+    "CHF",
+    "CNY",
+    "HKD",
+    "NZD",
+    "SEK",
+    "NOK",
+    "DKK",
+    "SGD",
+    "KRW",
+    "INR",
+]
 
 
 async def fetch_exchange_rates(
     base_currency: str, rate_date: date | None = None
 ) -> dict[str, float] | None:
-    """Fetch exchange rates for a base currency using exchangerate-api.com.
+    """Fetch exchange rates for a base currency using yfinance.
 
-    Fetches current rates from the API. Historical rates are not supported by the free API,
-    so if a date is provided, current rates are returned with a warning logged.
+    Fetches current or historical rates from Yahoo Finance. Unlike exchangerate-api.com,
+    yfinance fully supports historical data for accurate backtesting and analysis.
 
     Args:
         base_currency: ISO 4217 currency code (e.g., "USD", "EUR")
         rate_date: Specific date to fetch rates for (default: None for current rates)
-                   NOTE: Historical rates not supported - current rates returned instead
+                   Historical dates are fully supported via yfinance
 
     Returns:
         Dictionary mapping currency codes to exchange rates, or None on failure.
@@ -61,73 +79,102 @@ async def fetch_exchange_rates(
         >>> rates = await fetch_exchange_rates("USD")
         >>> print(rates["EUR"])
         0.92
-        >>> # Historical rates fallback to current rates
+        >>> # Get historical rates (now supported!)
         >>> from datetime import date
         >>> rates = await fetch_exchange_rates("USD", date(2024, 1, 15))
-        >>> print(rates["EUR"])  # Returns current rate, not historical
-        0.92
+        >>> print(rates["EUR"])  # Returns actual historical rate for 2024-01-15
+        0.91
 
     Note:
         Returns None on API failures (logs error). This ensures graceful
         degradation if the external service is unavailable.
-        Historical rates are NOT supported by the free API tier of exchangerate-api.com.
+        Uses yfinance Ticker.history() for data retrieval.
     """
     base_currency_upper = base_currency.upper()
 
-    # Warn if historical rates requested (not supported by free API)
-    if rate_date:
-        logger.warning(
-            f"Historical rates not supported by exchangerate-api.com free tier. "
-            f"Returning current rates instead of rates for {rate_date}"
-        )
-
     try:
-        # Build API URL
-        url = f"{EXCHANGE_RATE_API_BASE}/{base_currency_upper}"
+        # Determine target currencies (all except base)
+        target_currencies = [curr for curr in MAJOR_CURRENCIES if curr != base_currency_upper]
 
-        # Make synchronous request in executor to avoid blocking async event loop
-        loop = asyncio.get_running_loop()
-        response = await loop.run_in_executor(
-            None,
-            lambda: requests.get(url, timeout=REQUEST_TIMEOUT),
-        )
-
-        # Check for HTTP errors
-        response.raise_for_status()
-
-        # Parse JSON response
-        data = response.json()
-
-        # Validate response structure
-        if "rates" not in data:
-            logger.error(f"Invalid API response structure for {base_currency}: missing 'rates' key")
+        if not target_currencies:
+            logger.error(f"No target currencies found for base {base_currency}")
             return None
 
-        rates: dict[str, float] = data["rates"]
+        # Build currency pair tickers (format: "USDEUR=X" for USD to EUR)
+        ticker_symbols = [f"{base_currency_upper}{target}=X" for target in target_currencies]
 
-        # Add base currency with rate 1.0 (API doesn't include it)
+        # Determine date range for fetching
+        if rate_date is None:
+            # Fetch current/recent data (last 5 days to ensure we get latest)
+            end_date = date.today()
+            start_date = end_date - timedelta(days=5)
+            logger.info(f"Fetching current rates for {base_currency} (last 5 days)")
+        else:
+            # Fetch historical data for specific date (add buffer for weekends/holidays)
+            start_date = rate_date - timedelta(days=7)
+            end_date = rate_date + timedelta(days=1)
+            logger.info(f"Fetching historical rates for {base_currency} on {rate_date}")
+
+        # Fetch data using yfinance (synchronous, so run in executor)
+        loop = asyncio.get_running_loop()
+
+        def fetch_yfinance_data() -> dict[str, float]:
+            """Fetch exchange rate data from yfinance (runs in executor)."""
+            rates_dict: dict[str, float] = {}
+
+            for i, ticker_symbol in enumerate(ticker_symbols):
+                target_currency = target_currencies[i]
+
+                try:
+                    # Create ticker and fetch historical data
+                    ticker = yf.Ticker(ticker_symbol)
+                    hist = ticker.history(start=start_date, end=end_date)
+
+                    if hist.empty:
+                        logger.warning(
+                            f"No data returned for {ticker_symbol} "
+                            f"(period: {start_date} to {end_date})"
+                        )
+                        continue
+
+                    # Get the close price for the target date (or most recent)
+                    if rate_date is None:
+                        # Use most recent close price
+                        rate_value = hist["Close"].iloc[-1]
+                    else:
+                        # Find closest date to requested date
+                        hist.index = hist.index.tz_localize(None)  # Remove timezone
+                        closest_date = min(hist.index, key=lambda d: abs(d.date() - rate_date))
+                        rate_value = hist.loc[closest_date]["Close"]
+
+                    rates_dict[target_currency] = float(rate_value)
+
+                except Exception as e:
+                    logger.warning(f"Failed to fetch rate for {ticker_symbol}: {e}")
+                    continue
+
+            return rates_dict
+
+        # Run yfinance fetch in executor to avoid blocking event loop
+        rates = await loop.run_in_executor(None, fetch_yfinance_data)
+
+        if not rates:
+            logger.error(f"No exchange rates fetched for {base_currency}")
+            return None
+
+        # Add base currency with rate 1.0
         rates[base_currency_upper] = 1.0
 
-        logger.info(f"Fetched {len(rates)} exchange rates for base currency {base_currency}")
+        logger.info(
+            f"Successfully fetched {len(rates)} exchange rates for {base_currency} "
+            f"({'current' if rate_date is None else f'date: {rate_date}'})"
+        )
         return rates
 
-    except requests.exceptions.Timeout:
-        logger.error(f"Timeout fetching exchange rates for {base_currency} from {url}")
-        return None
-    except requests.exceptions.HTTPError as e:
-        logger.error(
-            f"HTTP error fetching exchange rates for {base_currency}: "
-            f"{e.response.status_code} - {e.response.text}"
-        )
-        return None
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Network error fetching exchange rates for {base_currency}: {e}")
-        return None
-    except ValueError as e:
-        logger.error(f"Invalid JSON response for {base_currency}: {e}")
-        return None
     except Exception as e:
-        logger.error(f"Unexpected error fetching exchange rates for {base_currency}: {e}")
+        logger.error(
+            f"Unexpected error fetching exchange rates for {base_currency}: {e}", exc_info=True
+        )
         return None
 
 
@@ -136,27 +183,35 @@ async def sync_currency_rates(
 ) -> tuple[int, int]:
     """Fetch and store exchange rates for a base currency in the database.
 
-    Fetches current exchange rates from external API and stores them in the database
-    for the specified date. Skips currencies that don't exist in the database.
+    Fetches current or historical exchange rates from Yahoo Finance via yfinance
+    and stores them in the database for the specified date. Skips currencies that
+    don't exist in the database.
 
     Args:
         db: Database session
         base_currency: Base currency code (default: "USD")
         sync_date: Date to sync rates for (default: today)
+                   Historical dates fully supported via yfinance
 
     Returns:
         Tuple of (synced_count, failed_count) representing successful and failed syncs
 
     Example:
+        >>> # Sync current rates
         >>> synced, failed = await sync_currency_rates(db, "USD")
         >>> print(f"Synced {synced} rates, {failed} failures")
         Synced 8 rates, 0 failures
+        >>> # Sync historical rates (now supported!)
+        >>> synced, failed = await sync_currency_rates(db, "USD", date(2024, 1, 15))
+        >>> print(f"Synced {synced} historical rates")
+        Synced 8 historical rates
 
     Note:
         - Creates bidirectional rates (e.g., USD->EUR and EUR->USD)
         - Skips duplicate rates (unique constraint on from/to/date)
         - Only syncs currencies that exist in the database
         - Logs all operations for monitoring
+        - Historical rates are fetched from Yahoo Finance via yfinance
     """
     if sync_date is None:
         sync_date = date.today()
@@ -276,17 +331,17 @@ async def get_exchange_rate(
     to_curr = currencies[to_currency]
 
     # Get rate for the date
-    result = await db.execute(
-        select(CurrencyRate).where(
-            CurrencyRate.from_currency_id == from_curr.id,
-            CurrencyRate.to_currency_id == to_curr.id,
-            CurrencyRate.date == rate_date,
-        )
+    stmt = select(CurrencyRate).where(
+        CurrencyRate.from_currency_id == from_curr.id,
+        CurrencyRate.to_currency_id == to_curr.id,
+        CurrencyRate.date == rate_date,
     )
-    rate = result.scalar_one_or_none()
+    result = await db.execute(stmt)
+    currency_rate = result.scalar_one_or_none()
+    assert isinstance(currency_rate, (CurrencyRate, type(None)))
 
-    if rate is None:
+    if currency_rate is None:
         logger.warning(f"Rate not found for {from_currency}->{to_currency} on {rate_date}")
         return None
 
-    return rate.rate
+    return currency_rate.rate

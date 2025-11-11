@@ -4,6 +4,7 @@ from sqlalchemy import select
 
 from app.models.account import Account
 from app.repositories.base import BaseRepository
+from app.schemas.account import AccountCreate, AccountUpdate
 
 
 class AccountRepository(BaseRepository[Account]):
@@ -190,3 +191,59 @@ class AccountRepository(BaseRepository[Account]):
 
         # Filter using the model property
         return [account for account in accounts if account.is_asset]
+
+    async def create_account(
+        self,
+        *,
+        obj_in: AccountCreate,
+    ) -> Account:
+        """Create a new account with type-safe Pydantic validation.
+
+        Args:
+            obj_in: Validated account creation data (Pydantic model)
+
+        Returns:
+            The created account (not yet committed)
+
+        Note:
+            Caller must commit the transaction.
+
+        Example:
+            >>> from app.schemas.account import AccountCreate
+            >>> account_data = AccountCreate(
+            ...     user_id=1,
+            ...     name="My Checking",
+            ...     account_type="checking",
+            ...     is_investment_account=False,
+            ... )
+            >>> account = await repo.create_account(obj_in=account_data)
+            >>> await db.commit()
+        """
+        return await self.create(obj_in=obj_in)
+
+    async def update_account(
+        self,
+        *,
+        db_obj: Account,
+        obj_in: AccountUpdate,
+    ) -> Account:
+        """Update an account with type-safe Pydantic validation.
+
+        Args:
+            db_obj: The existing account to update
+            obj_in: Validated account update data (Pydantic model)
+
+        Returns:
+            The updated account (not yet committed)
+
+        Note:
+            Caller must commit the transaction.
+
+        Example:
+            >>> from app.schemas.account import AccountUpdate
+            >>> account = await repo.get(account_id)
+            >>> update_data = AccountUpdate(name="Updated Checking")
+            >>> updated = await repo.update_account(db_obj=account, obj_in=update_data)
+            >>> await db.commit()
+        """
+        return await self.update(db_obj=db_obj, obj_in=obj_in)

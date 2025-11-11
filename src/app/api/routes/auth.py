@@ -5,19 +5,15 @@ import secrets
 from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.deps import CurrentActiveUser
-from app.core.security import (
-    create_access_token,
-    create_refresh_token,
-    get_password_hash,
-    verify_password,
-)
-from app.db.session import get_db
+from app.core.rate_limit import limiter
+from app.core.security import get_password_hash, verify_password
+from app.db.session import get_db, transactional
 from app.models.user import User
 from app.repositories.user import UserRepository
 from app.schemas.auth import (
@@ -36,12 +32,17 @@ logger = logging.getLogger(__name__)
 
 
 @router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
+@limiter.limit(settings.AUTH_RATE_LIMIT)
 async def register(
+    request: Request,
     user_data: UserRegister,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> User:
     """
     Register a new user.
+
+    Uses transactional context manager for atomic user creation with automatic
+    rollback on validation errors.
 
     Args:
         user_data: User registration data
@@ -51,7 +52,7 @@ async def register(
         The created user
 
     Raises:
-        HTTPException: If username or email already exists
+        HTTPException: 400 if username or email already exists
     """
     # Check if username already exists
     if await user_service.username_exists(db, user_data.username):
@@ -67,25 +68,27 @@ async def register(
             detail="Email already registered",
         )
 
-    # Create new user
-    hashed_password = get_password_hash(user_data.password)
-    new_user = User(
-        email=user_data.email,
-        username=user_data.username,
-        hashed_password=hashed_password,
-        is_active=True,
-        is_superuser=False,
-    )
+    # Create new user within transaction
+    async with transactional(db):
+        hashed_password = get_password_hash(user_data.password)
+        new_user = User(
+            email=user_data.email,
+            username=user_data.username,
+            hashed_password=hashed_password,
+            is_active=True,
+            is_superuser=False,
+        )
+        db.add(new_user)
 
-    db.add(new_user)
-    await db.commit()
+    # Refresh outside transaction to ensure we have committed data
     await db.refresh(new_user)
-
     return new_user
 
 
 @router.post("/login", response_model=Token)
+@limiter.limit(settings.AUTH_RATE_LIMIT)
 async def login(
+    request: Request,
     form_data: Annotated[OAuth2PasswordRequestForm, Depends()],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> Token:
@@ -104,21 +107,16 @@ async def login(
     Raises:
         HTTPException: If credentials are invalid
     """
-    # Authenticate user
-    user = await user_service.authenticate_user(db, form_data.username, form_data.password)
-
-    # Create access token
-    access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
-    access_token = create_access_token(
-        data={"sub": user.username},
-        expires_delta=access_token_expires,
+    tokens = await user_service.create_user_tokens(
+        db, form_data.username, form_data.password, include_refresh=False
     )
-
-    return Token(access_token=access_token)
+    return Token(access_token=tokens["access_token"])
 
 
 @router.post("/login/tokens", response_model=TokenPair)
+@limiter.limit(settings.AUTH_RATE_LIMIT)
 async def login_with_refresh(
+    request: Request,
     form_data: Annotated[OAuth2PasswordRequestForm, Depends()],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> TokenPair:
@@ -135,18 +133,13 @@ async def login_with_refresh(
     Raises:
         HTTPException: If credentials are invalid
     """
-    # Authenticate user
-    user = await user_service.authenticate_user(db, form_data.username, form_data.password)
-
-    # Create tokens
-    access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
-    access_token = create_access_token(
-        data={"sub": user.username},
-        expires_delta=access_token_expires,
+    tokens = await user_service.create_user_tokens(
+        db, form_data.username, form_data.password, include_refresh=True
     )
-    refresh_token = create_refresh_token(data={"sub": user.username})
-
-    return TokenPair(access_token=access_token, refresh_token=refresh_token)
+    return TokenPair(
+        access_token=tokens["access_token"],
+        refresh_token=tokens["refresh_token"],
+    )
 
 
 @router.get("/me", response_model=UserResponse)
@@ -178,7 +171,9 @@ async def test_token(current_user: CurrentActiveUser) -> User:
 
 
 @router.post("/forgot-password", response_model=MessageResponse)
+@limiter.limit(settings.AUTH_RATE_LIMIT)
 async def forgot_password(
+    request: Request,
     request_data: ForgotPasswordRequest,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> MessageResponse:

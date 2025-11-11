@@ -8,6 +8,7 @@ from sqlalchemy.orm import joinedload
 
 from app.models.holding import Holding
 from app.repositories.base import BaseRepository
+from app.schemas.holding import HoldingCreate, HoldingUpdate
 
 
 class HoldingRepository(BaseRepository[Holding]):
@@ -55,6 +56,35 @@ class HoldingRepository(BaseRepository[Holding]):
             .limit(limit)
         )
         return list(result.scalars().all())
+
+    async def get_by_id_and_account(
+        self,
+        holding_id: UUID,
+        account_id: UUID,
+    ) -> Holding | None:
+        """Get holding by ID, ensuring it belongs to the specified account.
+
+        Args:
+            holding_id: Holding ID
+            account_id: Account ID (for ownership verification)
+
+        Returns:
+            Holding if found and belongs to account, None otherwise
+
+        Example:
+            >>> holding = await repo.get_by_id_and_account(
+            ...     holding_id=holding_id,
+            ...     account_id=account_id
+            ... )
+            >>> if holding:
+            ...     print(f"Shares: {holding.shares}")
+        """
+        result = await self.db.execute(
+            select(Holding)
+            .options(joinedload(Holding.security))
+            .where(Holding.id == holding_id, Holding.account_id == account_id)
+        )
+        return result.scalar_one_or_none()
 
     async def get_by_account_and_security(
         self,
@@ -258,3 +288,61 @@ class HoldingRepository(BaseRepository[Holding]):
             .limit(limit)
         )
         return list(result.scalars().all())
+
+    async def create_holding(
+        self,
+        *,
+        obj_in: HoldingCreate,
+    ) -> Holding:
+        """Create a new holding with type-safe Pydantic validation.
+
+        Args:
+            obj_in: Validated holding creation data (Pydantic model)
+
+        Returns:
+            The created holding (not yet committed)
+
+        Note:
+            Caller must commit the transaction.
+
+        Example:
+            >>> from app.schemas.holding import HoldingCreate
+            >>> from datetime import datetime, UTC
+            >>> holding_data = HoldingCreate(
+            ...     account_id=account_id,
+            ...     security_id=security_id,
+            ...     timestamp=datetime.now(UTC),
+            ...     shares=100,
+            ...     average_price_per_share=150.00,
+            ... )
+            >>> holding = await repo.create_holding(obj_in=holding_data)
+            >>> await db.commit()
+        """
+        return await self.create(obj_in=obj_in)
+
+    async def update_holding(
+        self,
+        *,
+        db_obj: Holding,
+        obj_in: HoldingUpdate,
+    ) -> Holding:
+        """Update a holding with type-safe Pydantic validation.
+
+        Args:
+            db_obj: The existing holding to update
+            obj_in: Validated holding update data (Pydantic model)
+
+        Returns:
+            The updated holding (not yet committed)
+
+        Note:
+            Caller must commit the transaction.
+
+        Example:
+            >>> from app.schemas.holding import HoldingUpdate
+            >>> holding = await repo.get(holding_id)
+            >>> update_data = HoldingUpdate(shares=150, average_price_per_share=155.00)
+            >>> updated = await repo.update_holding(db_obj=holding, obj_in=update_data)
+            >>> await db.commit()
+        """
+        return await self.update(db_obj=db_obj, obj_in=obj_in)

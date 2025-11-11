@@ -2,10 +2,14 @@
 
 Provides generic database operations that can be inherited by model-specific
 repositories. Uses SQLAlchemy 2.0's async API with proper type hints.
+
+Supports both Pydantic models and dictionaries for create/update operations,
+with automatic validation for Pydantic models.
 """
 
 from typing import Any, Generic, TypeVar
 
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -84,11 +88,12 @@ class BaseRepository(Generic[ModelType]):
         result = await self.db.execute(select(self.model).offset(skip).limit(limit))
         return list(result.scalars().all())
 
-    async def create(self, *, obj_in: dict[str, Any]) -> ModelType:
-        """Create a new record.
+    async def create(self, *, obj_in: BaseModel | dict[str, Any]) -> ModelType:
+        """Create a new record with Pydantic validation support.
 
         Args:
-            obj_in: Dictionary of field names and values
+            obj_in: Pydantic model or dictionary of field names and values.
+                Pydantic models are recommended for automatic validation.
 
         Returns:
             Created model instance (not yet committed)
@@ -96,12 +101,31 @@ class BaseRepository(Generic[ModelType]):
         Note:
             Caller must commit the transaction.
 
+        Raises:
+            ValidationError: If Pydantic model validation fails
+            TypeError: If dictionary contains invalid field names
+
         Example:
+            Using Pydantic model (recommended for type safety and validation):
+
+            >>> from app.schemas.user import UserCreate
+            >>> user_data = UserCreate(email="test@example.com", password="secure123", username="test")
+            >>> user = await repo.create(obj_in=user_data)
+            >>> await db.commit()
+
+            Using dictionary (for dynamic data):
+
             >>> user_data = {"email": "test@example.com", "username": "test"}
             >>> user = await repo.create(obj_in=user_data)
             >>> await db.commit()
         """
-        db_obj = self.model(**obj_in)
+        # Convert Pydantic model to dictionary if needed
+        if isinstance(obj_in, BaseModel):
+            create_data = obj_in.model_dump(exclude_unset=True)
+        else:
+            create_data = obj_in
+
+        db_obj = self.model(**create_data)
         self.db.add(db_obj)
         await self.db.flush()
         await self.db.refresh(db_obj)
@@ -111,13 +135,14 @@ class BaseRepository(Generic[ModelType]):
         self,
         *,
         db_obj: ModelType,
-        obj_in: dict[str, Any],
+        obj_in: BaseModel | dict[str, Any],
     ) -> ModelType:
-        """Update an existing record.
+        """Update an existing record with Pydantic validation support.
 
         Args:
             db_obj: Existing model instance to update
-            obj_in: Dictionary of fields to update (can be partial)
+            obj_in: Pydantic model or dictionary of fields to update (can be partial).
+                Pydantic models are recommended for automatic validation.
 
         Returns:
             Updated model instance (not yet committed)
@@ -125,7 +150,21 @@ class BaseRepository(Generic[ModelType]):
         Note:
             Caller must commit the transaction.
 
+        Raises:
+            ValidationError: If Pydantic model validation fails
+            AttributeError: If dictionary contains invalid field names
+
         Example:
+            Using Pydantic model (recommended for type safety and validation):
+
+            >>> from app.schemas.user import UserUpdate
+            >>> user = await repo.get(123)
+            >>> update_data = UserUpdate(email="new@example.com")
+            >>> updated = await repo.update(db_obj=user, obj_in=update_data)
+            >>> await db.commit()
+
+            Using dictionary (for dynamic data):
+
             >>> user = await repo.get(123)
             >>> updated = await repo.update(
             ...     db_obj=user,
@@ -133,7 +172,13 @@ class BaseRepository(Generic[ModelType]):
             ... )
             >>> await db.commit()
         """
-        for field, value in obj_in.items():
+        # Convert Pydantic model to dictionary if needed
+        if isinstance(obj_in, BaseModel):
+            update_data = obj_in.model_dump(exclude_unset=True)
+        else:
+            update_data = obj_in
+
+        for field, value in update_data.items():
             setattr(db_obj, field, value)
 
         await self.db.flush()

@@ -31,9 +31,7 @@ async def test_authenticate_user_success_with_username(
 
 
 @pytest.mark.integration
-async def test_authenticate_user_success_with_email(
-    test_db: AsyncSession, test_user: User
-) -> None:
+async def test_authenticate_user_success_with_email(test_db: AsyncSession, test_user: User) -> None:
     """Test successful authentication using email."""
     # Authenticate with email
     authenticated_user = await authenticate_user(test_db, "test@example.com", "TestPass123")
@@ -56,9 +54,7 @@ async def test_authenticate_user_invalid_username(test_db: AsyncSession) -> None
 
 
 @pytest.mark.integration
-async def test_authenticate_user_invalid_password(
-    test_db: AsyncSession, test_user: User
-) -> None:
+async def test_authenticate_user_invalid_password(test_db: AsyncSession, test_user: User) -> None:
     """Test authentication with incorrect password."""
     with pytest.raises(HTTPException) as exc_info:
         await authenticate_user(test_db, "testuser", "WrongPassword")
@@ -91,9 +87,7 @@ async def test_authenticate_user_empty_username(test_db: AsyncSession) -> None:
 
 
 @pytest.mark.integration
-async def test_authenticate_user_none_password(
-    test_db: AsyncSession, test_user: User
-) -> None:
+async def test_authenticate_user_none_password(test_db: AsyncSession, test_user: User) -> None:
     """Test authentication ensures password verification is called."""
     # Create user with known password
     user = User(

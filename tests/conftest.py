@@ -209,3 +209,21 @@ async def other_user_account(test_db: AsyncSession, other_user: User):
     await test_db.commit()
     await test_db.refresh(account)
     return account
+
+
+@pytest_asyncio.fixture(scope="function")
+async def test_security(test_db: AsyncSession):
+    """Create a test security."""
+    from app.models.security import Security
+
+    security = Security(
+        symbol="AAPL",
+        name="Apple Inc.",
+        currency="USD",
+        exchange="NASDAQ",
+        security_type="EQUITY",
+    )
+    test_db.add(security)
+    await test_db.commit()
+    await test_db.refresh(security)
+    return security

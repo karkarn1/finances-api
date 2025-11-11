@@ -2,13 +2,17 @@
 
 import logging
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
+from app.core.constants import SearchConstants
 from app.core.deps import CurrentActiveUser
+from app.core.exceptions import NotFoundError
+from app.core.rate_limit import limiter
 from app.db.session import get_db
 from app.models.security import Security
 from app.models.security_price import SecurityPrice
@@ -20,6 +24,7 @@ from app.schemas.security import (
     SecurityResponse,
     SyncResponse,
 )
+from app.services.price_data_service import PriceDataService
 from app.services.yfinance_service import (
     APIError,
     InvalidSymbolError,
@@ -87,7 +92,7 @@ async def search_securities(
         query_upper = q.strip().upper()
         has_exact_match = any(sec.symbol.upper() == query_upper for sec in db_securities)
 
-        if not has_exact_match and len(query_upper) <= 10:
+        if not has_exact_match and len(query_upper) <= SearchConstants.MAX_SYMBOL_LENGTH:
             # Try to fetch from yfinance
             try:
                 logger.info(f"Attempting to fetch symbol '{query_upper}' from yfinance")
@@ -173,32 +178,32 @@ async def get_security(
     # Security doesn't exist - fetch from Yahoo Finance and create it
     logger.info(f"Security '{symbol}' not found in database, fetching from Yahoo Finance")
 
+    # Sync security data from yfinance (create + fetch prices)
     try:
-        # Sync security data from yfinance (create + fetch prices)
         security, _ = await sync_security_data(db, symbol)
         return security
-
-    except InvalidSymbolError as e:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=str(e),
-        ) from e
-    except APIError as e:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"Yahoo Finance API error: {str(e)}",
-        ) from e
+    except InvalidSymbolError:
+        # Symbol not found in Yahoo Finance - raise user-friendly 404
+        raise NotFoundError(
+            f"Security '{symbol}' not found in database or Yahoo Finance. "
+            "Please verify the symbol is correct."
+        )
+    except APIError:
+        # Yahoo Finance API error - let it propagate (centralized handler converts to 503)
+        raise
     except Exception as e:
-        # Handle unexpected errors - log and return 500
-        logger.error(f"Unexpected error fetching security {symbol}: {e}", exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to fetch security: {str(e)}",
-        ) from e
+        # Unexpected error - log and raise 404 as fallback
+        logger.error(f"Unexpected error fetching security '{symbol}': {e}", exc_info=True)
+        raise NotFoundError(
+            f"Security '{symbol}' not found in database or Yahoo Finance. "
+            "Please verify the symbol is correct."
+        )
 
 
 @router.post("/{symbol}/sync", response_model=SyncResponse)
+@limiter.limit(settings.SYNC_RATE_LIMIT)
 async def sync_security(
+    request: Request,
     symbol: str,
     current_user: CurrentActiveUser,
     db: Annotated[AsyncSession, Depends(get_db)],
@@ -226,45 +231,19 @@ async def sync_security(
     Example:
         POST /api/v1/securities/AAPL/sync
     """
-    from app.services.security_service import (
-        ConcurrentSyncError,
-        sync_security_data,
-    )
+    from app.services.security_service import sync_security_data
 
     symbol = symbol.upper()
 
-    try:
-        # Sync security with concurrent check enabled
-        security, total_prices_synced = await sync_security_data(db, symbol, check_concurrent=True)
+    # Sync security with concurrent check enabled
+    # Centralized exception handler will convert exceptions to appropriate HTTP responses
+    security, total_prices_synced = await sync_security_data(db, symbol, check_concurrent=True)
 
-        return SyncResponse(
-            security=security,
-            prices_synced=total_prices_synced,
-            message=f"Successfully synced {total_prices_synced} price records for {symbol}",
-        )
-
-    except ConcurrentSyncError as e:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=str(e),
-        ) from e
-    except InvalidSymbolError as e:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=str(e),
-        ) from e
-    except APIError as e:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"Yahoo Finance API error: {str(e)}",
-        ) from e
-    except Exception as e:
-        # Handle unexpected errors
-        logger.error(f"Unexpected error syncing {symbol}: {e}", exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to sync security: {str(e)}",
-        ) from e
+    return SyncResponse(
+        security=security,
+        prices_synced=total_prices_synced,
+        message=f"Successfully synced {total_prices_synced} price records for {symbol}",
+    )
 
 
 @router.get("/{symbol}/prices", response_model=SecurityPricesResponse)
@@ -307,40 +286,18 @@ async def get_security_prices(
     security = await security_repo.get_by_symbol(symbol.upper())
 
     if not security:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Security with symbol '{symbol}' not found. Try syncing it first.",
-        )
+        raise NotFoundError(f"Security with symbol '{symbol}' not found. Try syncing it first.")
 
-    # Set default time range based on interval if not provided
-    now = datetime.now(UTC)
+    # Normalize date range and set defaults based on interval - delegated to service
+    requested_start, requested_end = PriceDataService.normalize_and_default_date_range(
+        start, end, interval
+    )
 
-    # Handle end datetime
-    if end is None:
-        requested_end = now
-    elif end.tzinfo is None:
-        requested_end = end.replace(tzinfo=UTC)
-    else:
-        requested_end = end
-
-    # Handle start datetime
-    if start is None:
-        if interval == "1m":
-            # Last 24 hours for minute data
-            requested_start = now - timedelta(days=1)
-        else:
-            # Last 30 days for other intervals
-            requested_start = now - timedelta(days=30)
-    elif start.tzinfo is None:
-        requested_start = start.replace(tzinfo=UTC)
-    else:
-        requested_start = start
-
-    # Expand search range to find nearby data if exact range has gaps
-    # This handles weekends, holidays, and sparse trading data
-    search_buffer_days = 7  # Look 7 days before/after for data
-    expanded_start = requested_start - timedelta(days=search_buffer_days)
-    expanded_end = requested_end + timedelta(days=search_buffer_days)
+    # Expand search range to find nearby data (handles weekends, holidays) - delegated to service
+    expanded_start, expanded_end = PriceDataService.expand_date_range_for_search(
+        requested_start,
+        requested_end,
+    )
 
     # Query prices with expanded range using repository
     price_repo = SecurityPriceRepository(SecurityPrice, db)
@@ -351,16 +308,12 @@ async def get_security_prices(
         interval=interval,
     )
 
-    # Filter to get prices closest to requested range
-    # Prioritize data within requested range, then nearby data
-    # Ensure all timestamps are timezone-aware for comparison
-    prices_in_range = [
-        p
-        for p in all_prices
-        if requested_start
-        <= (p.timestamp.replace(tzinfo=UTC) if p.timestamp.tzinfo is None else p.timestamp)
-        <= requested_end
-    ]
+    # Filter to requested range (prioritize data within range) - delegated to service
+    prices_in_range = PriceDataService.filter_prices_to_date_range(
+        all_prices,
+        requested_start,
+        requested_end,
+    )
 
     # If no data in exact range, use all available data from expanded search
     prices_to_return = prices_in_range if prices_in_range else all_prices
@@ -374,36 +327,19 @@ async def get_security_prices(
         actual_start = prices_to_return[0].timestamp
         actual_end = prices_to_return[-1].timestamp
 
-        # Determine data completeness
-        if not prices_in_range:
-            # Data exists but outside requested range
-            data_completeness = "partial"
-        else:
-            # Calculate expected vs actual data points based on interval
-            time_span_days = (requested_end - requested_start).days
+        # Calculate expected data points for completeness analysis - delegated to service
+        expected_points = PriceDataService.calculate_expected_data_points(
+            requested_start,
+            requested_end,
+            interval,
+        )
 
-            if interval == "1d":
-                # Daily data: expect ~5 trading days per week
-                expected_points = max(1, int(time_span_days * 5 / 7))
-            elif interval == "1wk":
-                # Weekly data: expect ~1 point per week
-                expected_points = max(1, time_span_days // 7)
-            elif interval == "1h":
-                # Hourly data: expect ~6.5 trading hours per day
-                expected_points = max(1, int(time_span_days * 6.5))
-            else:  # "1m"
-                # Minute data: expect ~390 minutes per trading day
-                expected_points = max(1, int(time_span_days * 390))
-
-            actual_points = len(prices_in_range)
-            completeness_ratio = actual_points / expected_points if expected_points > 0 else 0
-
-            if completeness_ratio >= 0.8:
-                data_completeness = "complete"
-            elif completeness_ratio >= 0.4:
-                data_completeness = "partial"
-            else:
-                data_completeness = "sparse"
+        # Determine data completeness status - delegated to service
+        data_completeness = PriceDataService.calculate_data_completeness(
+            actual_points=len(prices_in_range),
+            expected_points=expected_points,
+            has_data_in_range=bool(prices_in_range),
+        )
 
     # Convert to PriceData schema
     price_data = [

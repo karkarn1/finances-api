@@ -8,6 +8,7 @@ Repositories:
     - BaseRepository: Generic CRUD operations for any model
     - UserRepository: User-specific queries and operations
     - AccountRepository: Account-specific queries and operations
+    - AccountValueRepository: Account value-specific queries and operations
     - HoldingRepository: Holding-specific queries and operations
     - SecurityRepository: Security-specific queries and operations
     - SecurityPriceRepository: Price data queries and bulk operations
@@ -26,6 +27,7 @@ Usage:
 """
 
 from app.repositories.account import AccountRepository
+from app.repositories.account_value import AccountValueRepository
 from app.repositories.base import BaseRepository
 from app.repositories.holding import HoldingRepository
 from app.repositories.security import SecurityRepository
@@ -36,6 +38,7 @@ __all__ = [
     "BaseRepository",
     "UserRepository",
     "AccountRepository",
+    "AccountValueRepository",
     "HoldingRepository",
     "SecurityRepository",
     "SecurityPriceRepository",

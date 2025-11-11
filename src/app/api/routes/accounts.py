@@ -1,17 +1,16 @@
 """Account endpoints."""
 
 from typing import Annotated
-from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, status
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
 
 from app.core.deps import CurrentActiveUser, verify_account_access
 from app.db.session import get_db
 from app.models.account import Account
 from app.models.account_value import AccountValue
+from app.repositories.account import AccountRepository
+from app.repositories.account_value import AccountValueRepository
 from app.schemas.account import (
     AccountCreate,
     AccountResponse,
@@ -41,10 +40,12 @@ async def get_accounts(
     Returns:
         List of accounts
     """
-    result = await db.execute(
-        select(Account).where(Account.user_id == current_user.id).offset(skip).limit(limit)
+    repo = AccountRepository(Account, db)
+    return await repo.get_by_user_id(
+        user_id=current_user.id,
+        skip=skip,
+        limit=limit,
     )
-    return list(result.scalars().all())
 
 
 @router.post("/", response_model=AccountResponse, status_code=status.HTTP_201_CREATED)
@@ -57,18 +58,21 @@ async def create_account(
     Create a new account.
 
     Args:
-        account: Account data
+        account: Account data (validated Pydantic model)
         current_user: The authenticated user (from dependency)
         db: Database session
 
     Returns:
         The created account
     """
-    db_account = Account(
-        user_id=current_user.id,
-        **account.model_dump(),
-    )
-    db.add(db_account)
+    repo = AccountRepository(Account, db)
+
+    # Extract data from Pydantic model and add user_id
+    account_data = account.model_dump()
+    account_data["user_id"] = current_user.id
+
+    # Create using Pydantic model (already validated by FastAPI)
+    db_account = await repo.create(obj_in=account_data)
     await db.commit()
     await db.refresh(db_account)
 
@@ -79,7 +83,7 @@ async def create_account(
 async def get_account(
     account: Annotated[Account, Depends(verify_account_access)],
     db: Annotated[AsyncSession, Depends(get_db)],
-) -> dict:
+) -> dict[str, object]:
     """
     Get a specific account with computed current balance.
 
@@ -94,13 +98,8 @@ async def get_account(
         HTTPException: If account not found or access denied
     """
     # Get most recent account value
-    value_result = await db.execute(
-        select(AccountValue)
-        .where(AccountValue.account_id == account.id)
-        .order_by(AccountValue.timestamp.desc())
-        .limit(1)
-    )
-    latest_value = value_result.scalar_one_or_none()
+    value_repo = AccountValueRepository(AccountValue, db)
+    latest_value = await value_repo.get_latest_by_account(account.id)
 
     # Build response with current balance
     account_dict = {
@@ -131,7 +130,7 @@ async def update_account(
 
     Args:
         account: The verified account (from dependency)
-        account_update: Updated account data
+        account_update: Updated account data (validated Pydantic model)
         db: Database session
 
     Returns:
@@ -140,15 +139,17 @@ async def update_account(
     Raises:
         HTTPException: If account not found or access denied
     """
-    # Update fields
-    update_data = account_update.model_dump(exclude_unset=True)
-    for field, value in update_data.items():
-        setattr(account, field, value)
+    # Update with type-safe Pydantic validation
+    repo = AccountRepository(Account, db)
+    updated_account = await repo.update(
+        db_obj=account,
+        obj_in=account_update,  # Pass Pydantic model directly
+    )
 
     await db.commit()
-    await db.refresh(account)
+    await db.refresh(updated_account)
 
-    return account
+    return updated_account
 
 
 @router.delete("/{account_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -166,5 +167,6 @@ async def delete_account(
     Raises:
         HTTPException: If account not found or access denied
     """
-    await db.delete(account)
+    repo = AccountRepository(Account, db)
+    await repo.delete(id=account.id)
     await db.commit()

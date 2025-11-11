@@ -4,13 +4,13 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import verify_account_access
 from app.db.session import get_db
 from app.models.account import Account
 from app.models.account_value import AccountValue
+from app.repositories.account_value import AccountValueRepository
 from app.schemas.account_value import (
     AccountValueCreate,
     AccountValueResponse,
@@ -42,14 +42,12 @@ async def get_account_values(
     Raises:
         HTTPException: If account not found or access denied
     """
-    result = await db.execute(
-        select(AccountValue)
-        .where(AccountValue.account_id == account.id)
-        .order_by(AccountValue.timestamp.desc())
-        .offset(skip)
-        .limit(limit)
+    repo = AccountValueRepository(AccountValue, db)
+    return await repo.get_by_account_id(
+        account_id=account.id,
+        skip=skip,
+        limit=limit,
     )
-    return list(result.scalars().all())
 
 
 @router.post("/", response_model=AccountValueResponse, status_code=status.HTTP_201_CREATED)
@@ -63,7 +61,7 @@ async def create_account_value(
 
     Args:
         account: The verified account (from dependency)
-        account_value: Account value data
+        account_value: Account value data (validated Pydantic model)
         db: Database session
 
     Returns:
@@ -79,11 +77,14 @@ async def create_account_value(
             detail="Cash balance is required for investment accounts",
         )
 
-    db_account_value = AccountValue(
-        account_id=account.id,
-        **account_value.model_dump(),
-    )
-    db.add(db_account_value)
+    repo = AccountValueRepository(AccountValue, db)
+
+    # Extract data from Pydantic model and add account_id
+    value_data = account_value.model_dump()
+    value_data["account_id"] = account.id
+
+    # Create using Pydantic model (already validated by FastAPI)
+    db_account_value = await repo.create(obj_in=value_data)
     await db.commit()
     await db.refresh(db_account_value)
 
@@ -103,7 +104,7 @@ async def update_account_value(
     Args:
         account: The verified account (from dependency)
         value_id: The account value ID
-        account_value_update: Updated account value data
+        account_value_update: Updated account value data (validated Pydantic model)
         db: Database session
 
     Returns:
@@ -112,12 +113,11 @@ async def update_account_value(
     Raises:
         HTTPException: If account/value not found or access denied
     """
-    result = await db.execute(
-        select(AccountValue).where(
-            AccountValue.id == value_id, AccountValue.account_id == account.id
-        )
+    repo = AccountValueRepository(AccountValue, db)
+    account_value = await repo.get_by_id_and_account(
+        value_id=value_id,
+        account_id=account.id,
     )
-    account_value = result.scalar_one_or_none()
 
     if not account_value:
         raise HTTPException(
@@ -125,15 +125,16 @@ async def update_account_value(
             detail="Account value entry not found",
         )
 
-    # Update fields
-    update_data = account_value_update.model_dump(exclude_unset=True)
-    for field, value in update_data.items():
-        setattr(account_value, field, value)
+    # Update with type-safe Pydantic validation
+    updated_value = await repo.update(
+        db_obj=account_value,
+        obj_in=account_value_update,  # Pass Pydantic model directly
+    )
 
     await db.commit()
-    await db.refresh(account_value)
+    await db.refresh(updated_value)
 
-    return account_value
+    return updated_value
 
 
 @router.delete("/{value_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -153,12 +154,11 @@ async def delete_account_value(
     Raises:
         HTTPException: If account/value not found or access denied
     """
-    result = await db.execute(
-        select(AccountValue).where(
-            AccountValue.id == value_id, AccountValue.account_id == account.id
-        )
+    repo = AccountValueRepository(AccountValue, db)
+    account_value = await repo.get_by_id_and_account(
+        value_id=value_id,
+        account_id=account.id,
     )
-    account_value = result.scalar_one_or_none()
 
     if not account_value:
         raise HTTPException(
@@ -166,5 +166,5 @@ async def delete_account_value(
             detail="Account value entry not found",
         )
 
-    await db.delete(account_value)
+    await repo.delete(id=value_id)
     await db.commit()

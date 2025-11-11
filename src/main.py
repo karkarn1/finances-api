@@ -1,9 +1,14 @@
 """FastAPI application entry point."""
 
+import logging
+import logging.config
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
 
 from app.api.routes import (
     account_values,
@@ -18,12 +23,19 @@ from app.api.routes import (
 )
 from app.core.cache import configure_yfinance_cache
 from app.core.config import settings
+from app.core.exceptions import AppException, app_exception_handler
+from app.core.middleware import RequestLoggingMiddleware
+from app.core.rate_limit import limiter, rate_limit_exceeded_handler
 from app.db.base import Base
 from app.db.session import engine
 
+# Configure logging
+logging.config.dictConfig(settings.LOGGING_CONFIG)
+logger = logging.getLogger(__name__)
+
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Application lifespan events."""
     # Startup
     print("🚀 Starting application...")
@@ -50,6 +62,9 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Add rate limiter to app state
+app.state.limiter = limiter
+
 # Configure CORS
 app.add_middleware(
     CORSMiddleware,
@@ -58,6 +73,17 @@ app.add_middleware(
     allow_methods=settings.CORS_METHODS,
     allow_headers=settings.CORS_HEADERS,
 )
+
+# Add request/response logging middleware
+# Note: Middleware is applied in reverse order, so this will be the outermost layer
+app.add_middleware(RequestLoggingMiddleware)
+
+# Note: SlowAPIMiddleware is not used due to compatibility issues with FastAPI response models
+# X-RateLimit-* headers are only added to 429 responses via rate_limit_exceeded_handler
+
+# Register exception handlers
+app.add_exception_handler(AppException, app_exception_handler)  # type: ignore[arg-type]
+app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)  # type: ignore[arg-type]
 
 # Include routers
 app.include_router(health.router, tags=["health"])

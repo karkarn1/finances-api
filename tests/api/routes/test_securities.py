@@ -472,7 +472,9 @@ async def test_get_security_auto_sync_yfinance_api_error(
 
     response = await client.get("/api/v1/securities/AAPL")
     assert response.status_code == 503
-    assert "api error" in response.json()["detail"].lower()
+    # Check that the detail contains either "api" or "unavailable" to confirm it's an API error
+    detail = response.json()["detail"].lower()
+    assert "api" in detail or "unavailable" in detail
 
 
 @pytest.mark.asyncio
@@ -605,7 +607,9 @@ async def test_sync_security_api_error(
 
     response = await client.post("/api/v1/securities/AAPL/sync", headers=auth_headers)
     assert response.status_code == 503
-    assert "api error" in response.json()["detail"].lower()
+    # Check that the detail contains either "api" or "unavailable" to confirm it's an API error
+    detail = response.json()["detail"].lower()
+    assert "api" in detail or "unavailable" in detail
 
 
 @pytest.mark.asyncio

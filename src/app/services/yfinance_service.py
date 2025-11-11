@@ -16,25 +16,34 @@ from datetime import UTC, datetime
 import pandas as pd
 import yfinance as yf
 
+from app.core.exceptions import ExternalAPIError, ValidationError
 from app.models.security_price import SecurityPrice
 
 logger = logging.getLogger(__name__)
 
 
-class YFinanceError(Exception):
-    """Base exception for yfinance service errors."""
+# Legacy exception aliases for backward compatibility
+# These will be removed in a future version
+# Note: We override the status codes to maintain backward compatibility
+class YFinanceError(ExternalAPIError):
+    """Deprecated: Use ExternalAPIError instead."""
 
     pass
 
 
-class InvalidSymbolError(YFinanceError):
-    """Raised when symbol is not found in Yahoo Finance."""
+class InvalidSymbolError(ValidationError):
+    """Deprecated: Use ValidationError instead.
 
-    pass
+    Maps to 404 Not Found for backward compatibility with existing tests.
+    Prefer NotFoundError for new code.
+    """
+
+    status_code = 404  # Override to maintain backward compatibility
+    error_code = "INVALID_SYMBOL"
 
 
-class APIError(YFinanceError):
-    """Raised when Yahoo Finance API returns an error."""
+class APIError(ExternalAPIError):
+    """Deprecated: Use ExternalAPIError instead."""
 
     pass
 

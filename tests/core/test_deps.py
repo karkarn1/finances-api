@@ -1,7 +1,8 @@
 """Tests for core dependencies."""
 
-import pytest
 from uuid import uuid4
+
+import pytest
 from fastapi import HTTPException
 
 from app.core.deps import verify_account_access
@@ -74,7 +75,9 @@ async def test_verify_account_access_returns_account_model(test_db, test_user, t
 
 
 @pytest.mark.integration
-async def test_verify_account_access_with_different_users(test_db, test_user, other_user, test_account, other_user_account):
+async def test_verify_account_access_with_different_users(
+    test_db, test_user, other_user, test_account, other_user_account
+):
     """Test that different users can only access their own accounts."""
     # test_user can access their account
     account1 = await verify_account_access(

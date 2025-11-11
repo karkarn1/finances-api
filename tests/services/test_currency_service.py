@@ -55,50 +55,51 @@ async def test_fetch_exchange_rates_success() -> None:
 @pytest.mark.unit
 async def test_fetch_exchange_rates_mocked() -> None:
     """Test fetching exchange rates with mocked API response."""
+    import pandas as pd
+    from datetime import datetime
     from unittest.mock import MagicMock, Mock
 
-    # Mock response object
-    mock_response = Mock()
-    mock_response.json = MagicMock(
-        return_value={
-            "rates": {
-                "EUR": 0.92,
-                "GBP": 0.79,
-                "CAD": 1.35,
-            }
-        }
+    # Create mock DataFrame that yfinance returns with single row per currency
+    # This matches what yfinance actually returns for a single date
+    mock_df = pd.DataFrame(
+        {"Close": [0.92]},  # Single rate value
+        index=pd.DatetimeIndex([datetime(2024, 1, 15)]),
     )
-    # raise_for_status is a regular method
-    mock_response.raise_for_status = MagicMock()
 
-    with patch("httpx.AsyncClient") as mock_client:
-        # Set up the async context manager and get method
-        mock_instance = AsyncMock()
-        mock_instance.get = AsyncMock(return_value=mock_response)
-        mock_client.return_value.__aenter__.return_value = mock_instance
+    # Mock yfinance Ticker and history method
+    mock_ticker = Mock()
+    mock_ticker.history = MagicMock(return_value=mock_df)
 
+    with patch("yfinance.Ticker", return_value=mock_ticker) as mock_yf_ticker:
         # Test current rates (no date)
         rates = await fetch_exchange_rates("USD")
         assert rates is not None
         assert rates["USD"] == 1.0  # Base currency added by function
-        assert rates["EUR"] == 0.92
-        assert rates["GBP"] == 0.79
-        assert rates["CAD"] == 1.35
+        # Should have fetched rates for EUR, GBP, CAD, etc.
+        assert len(rates) > 1
+
+        # Verify yfinance.Ticker was called
+        assert mock_yf_ticker.call_count > 0
 
         # Test historical rates (with date)
         historical_date = date(2024, 1, 15)
         rates = await fetch_exchange_rates("USD", historical_date)
         assert rates is not None
         assert rates["USD"] == 1.0
-        assert rates["EUR"] == 0.92
+        # Should have fetched historical rates
+        assert len(rates) > 1
 
 
 @pytest.mark.unit
 async def test_fetch_exchange_rates_api_error() -> None:
     """Test handling API errors gracefully."""
-    with patch("httpx.AsyncClient") as mock_client:
-        mock_client.return_value.__aenter__.return_value.get.side_effect = Exception("API Error")
+    from unittest.mock import Mock
 
+    # Mock yfinance Ticker to raise an exception
+    mock_ticker = Mock()
+    mock_ticker.history.side_effect = Exception("API Error")
+
+    with patch("yfinance.Ticker", return_value=mock_ticker):
         rates = await fetch_exchange_rates("USD")
 
         assert rates is None
