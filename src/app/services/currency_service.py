@@ -225,16 +225,17 @@ async def sync_currency_rates(
         return 0, 0
 
     # Get base currency from database
-    result = await db.execute(select(Currency).where(Currency.code == base_currency.upper()))
+    base_currency_upper = base_currency.upper()
+    result = await db.execute(select(Currency).where(Currency.code == base_currency_upper))
     base_curr = result.scalar_one_or_none()
 
     if base_curr is None:
         logger.error(f"Base currency {base_currency} not found in database")
         return 0, 0
 
-    # Get all active currencies from database
-    result = await db.execute(select(Currency).where(Currency.is_active == True))  # noqa: E712
-    all_currencies = {curr.code: curr for curr in result.scalars().all()}
+    # Get all currencies from database
+    result = await db.execute(select(Currency))
+    all_currencies = {curr.code for curr in result.scalars().all()}
 
     synced_count = 0
     failed_count = 0
@@ -245,18 +246,16 @@ async def sync_currency_rates(
             logger.debug(f"Skipping {currency_code} - not in database")
             continue
 
-        target_curr = all_currencies[currency_code]
-
         # Skip if base and target are the same currency
-        if base_curr.id == target_curr.id:
+        if base_currency_upper == currency_code:
             logger.debug(f"Skipping {currency_code} - same as base currency")
             continue
 
         try:
             # Create rate from base to target currency
             rate = CurrencyRate(
-                from_currency_id=base_curr.id,
-                to_currency_id=target_curr.id,
+                from_currency_code=base_currency_upper,
+                to_currency_code=currency_code,
                 rate=Decimal(str(rate_value)),
                 date=sync_date,
             )
@@ -265,8 +264,8 @@ async def sync_currency_rates(
             # Create reverse rate (target to base)
             if rate_value != 0:
                 reverse_rate = CurrencyRate(
-                    from_currency_id=target_curr.id,
-                    to_currency_id=base_curr.id,
+                    from_currency_code=currency_code,
+                    to_currency_code=base_currency_upper,
                     rate=Decimal(str(1 / rate_value)),
                     date=sync_date,
                 )
@@ -317,28 +316,27 @@ async def get_exchange_rate(
     if rate_date is None:
         rate_date = date.today()
 
-    # Get currency IDs
-    result = await db.execute(
-        select(Currency).where(Currency.code.in_([from_currency, to_currency]))
-    )
-    currencies = {curr.code: curr for curr in result.scalars().all()}
+    from_currency_upper = from_currency.upper()
+    to_currency_upper = to_currency.upper()
 
-    if from_currency not in currencies or to_currency not in currencies:
+    # Verify currencies exist
+    result = await db.execute(
+        select(Currency).where(Currency.code.in_([from_currency_upper, to_currency_upper]))
+    )
+    existing_codes = {curr.code for curr in result.scalars().all()}
+
+    if from_currency_upper not in existing_codes or to_currency_upper not in existing_codes:
         logger.warning(f"Currency not found: {from_currency} or {to_currency}")
         return None
 
-    from_curr = currencies[from_currency]
-    to_curr = currencies[to_currency]
-
     # Get rate for the date
     stmt = select(CurrencyRate).where(
-        CurrencyRate.from_currency_id == from_curr.id,
-        CurrencyRate.to_currency_id == to_curr.id,
+        CurrencyRate.from_currency_code == from_currency_upper,
+        CurrencyRate.to_currency_code == to_currency_upper,
         CurrencyRate.date == rate_date,
     )
     result = await db.execute(stmt)
     currency_rate = result.scalar_one_or_none()
-    assert isinstance(currency_rate, (CurrencyRate, type(None)))
 
     if currency_rate is None:
         logger.warning(f"Rate not found for {from_currency}->{to_currency} on {rate_date}")

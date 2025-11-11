@@ -49,8 +49,8 @@ class Account(Base, TimestampMixin):
     financial_institution_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("financial_institutions.id", ondelete="SET NULL"), nullable=True
     )
-    currency_id: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("currencies.id", ondelete="SET NULL"), nullable=True
+    currency_code: Mapped[str | None] = mapped_column(
+        String(3), ForeignKey("currencies.code", ondelete="SET NULL"), nullable=True
     )
     name: Mapped[str] = mapped_column(String(255))
     account_type: Mapped[AccountType] = mapped_column(Enum(AccountType))

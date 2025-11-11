@@ -16,15 +16,15 @@ from app.models.currency_rate import CurrencyRate
 async def test_currencies(test_db: AsyncSession) -> dict[str, Currency]:
     """Create test currencies for testing."""
     currencies = [
-        Currency(code="USD", name="US Dollar", symbol="$", is_active=True),
-        Currency(code="EUR", name="Euro", symbol="€", is_active=True),
-        Currency(code="GBP", name="British Pound", symbol="£", is_active=True),
-        Currency(code="CAD", name="Canadian Dollar", symbol="C$", is_active=True),
+        Currency(code="USD", name="US Dollar", symbol="$"),
+        Currency(code="EUR", name="Euro", symbol="€"),
+        Currency(code="GBP", name="British Pound", symbol="£"),
+        Currency(code="CAD", name="Canadian Dollar", symbol="C$"),
     ]
     test_db.add_all(currencies)
     await test_db.commit()
 
-    # Refresh to get IDs
+    # Refresh to ensure they're loaded
     for curr in currencies:
         await test_db.refresh(curr)
 
@@ -43,37 +43,10 @@ async def test_list_currencies(
     assert isinstance(data, list)
     assert len(data) >= 4
 
-    # Check structure
-    assert "id" in data[0]
+    # Check structure (no id, is_active, or timestamps)
     assert "code" in data[0]
     assert "name" in data[0]
     assert "symbol" in data[0]
-    assert "is_active" in data[0]
-
-
-@pytest.mark.integration
-async def test_list_currencies_active_only(
-    client: AsyncClient, test_db: AsyncSession, test_currencies: dict[str, Currency]
-) -> None:
-    """Test listing only active currencies."""
-    # Create inactive currency
-    inactive_currency = Currency(code="XXX", name="Test Inactive", symbol="X", is_active=False)
-    test_db.add(inactive_currency)
-    await test_db.commit()
-
-    # Get active only
-    response = await client.get("/api/v1/currencies/?active_only=true")
-    assert response.status_code == 200
-    data = response.json()
-    codes = [c["code"] for c in data]
-    assert "XXX" not in codes
-
-    # Get all
-    response = await client.get("/api/v1/currencies/?active_only=false")
-    assert response.status_code == 200
-    data = response.json()
-    codes = [c["code"] for c in data]
-    assert "XXX" in codes
 
 
 @pytest.mark.integration
@@ -88,7 +61,6 @@ async def test_get_currency_success(
     assert data["code"] == "USD"
     assert data["name"] == "US Dollar"
     assert data["symbol"] == "$"
-    assert data["is_active"] is True
 
 
 @pytest.mark.integration
@@ -108,7 +80,6 @@ async def test_create_currency_success(
         "code": "NZD",
         "name": "New Zealand Dollar",
         "symbol": "NZ$",
-        "is_active": True,
     }
 
     response = await client.post("/api/v1/currencies/", json=currency_data)
@@ -118,8 +89,6 @@ async def test_create_currency_success(
     assert data["code"] == "NZD"
     assert data["name"] == "New Zealand Dollar"
     assert data["symbol"] == "NZ$"
-    assert data["is_active"] is True
-    assert "id" in data
 
 
 @pytest.mark.integration
@@ -131,7 +100,6 @@ async def test_create_currency_duplicate(
         "code": "USD",
         "name": "US Dollar",
         "symbol": "$",
-        "is_active": True,
     }
 
     response = await client.post("/api/v1/currencies/", json=currency_data)
@@ -145,14 +113,14 @@ async def test_create_currency_invalid_code(client: AsyncClient) -> None:
     # Code too short
     response = await client.post(
         "/api/v1/currencies/",
-        json={"code": "US", "name": "Test", "symbol": "$", "is_active": True},
+        json={"code": "US", "name": "Test", "symbol": "$"},
     )
     assert response.status_code == 422
 
     # Code too long
     response = await client.post(
         "/api/v1/currencies/",
-        json={"code": "USDD", "name": "Test", "symbol": "$", "is_active": True},
+        json={"code": "USDD", "name": "Test", "symbol": "$"},
     )
     assert response.status_code == 422
 
@@ -161,7 +129,7 @@ async def test_create_currency_invalid_code(client: AsyncClient) -> None:
 async def test_update_currency_success(client: AsyncClient, test_db: AsyncSession) -> None:
     """Test updating a currency."""
     # Create test currency
-    currency = Currency(code="TST", name="Test Currency", symbol="T", is_active=True)
+    currency = Currency(code="TST", name="Test Currency", symbol="T")
     test_db.add(currency)
     await test_db.commit()
 
@@ -169,7 +137,6 @@ async def test_update_currency_success(client: AsyncClient, test_db: AsyncSessio
     update_data = {
         "name": "Updated Test Currency",
         "symbol": "T$",
-        "is_active": False,
     }
 
     response = await client.put("/api/v1/currencies/TST", json=update_data)
@@ -179,7 +146,6 @@ async def test_update_currency_success(client: AsyncClient, test_db: AsyncSessio
     assert data["code"] == "TST"
     assert data["name"] == "Updated Test Currency"
     assert data["symbol"] == "T$"
-    assert data["is_active"] is False
 
 
 @pytest.mark.integration
@@ -193,7 +159,7 @@ async def test_update_currency_not_found(client: AsyncClient) -> None:
 async def test_update_currency_partial(client: AsyncClient, test_db: AsyncSession) -> None:
     """Test partial update of currency."""
     # Create test currency
-    currency = Currency(code="PAR", name="Partial Test", symbol="P", is_active=True)
+    currency = Currency(code="PAR", name="Partial Test", symbol="P")
     test_db.add(currency)
     await test_db.commit()
 
@@ -204,7 +170,6 @@ async def test_update_currency_partial(client: AsyncClient, test_db: AsyncSessio
     data = response.json()
     assert data["name"] == "New Name"
     assert data["symbol"] == "P"  # Unchanged
-    assert data["is_active"] is True  # Unchanged
 
 
 @pytest.mark.integration
@@ -212,21 +177,17 @@ async def test_get_currency_rates_success(
     client: AsyncClient, test_db: AsyncSession, test_currencies: dict[str, Currency]
 ) -> None:
     """Test getting exchange rates for a currency."""
-    usd = test_currencies["USD"]
-    eur = test_currencies["EUR"]
-    cad = test_currencies["CAD"]
-
-    # Create rates
+    # Create rates using currency codes
     today = date.today()
     rate1 = CurrencyRate(
-        from_currency_id=usd.id,
-        to_currency_id=eur.id,
+        from_currency_code="USD",
+        to_currency_code="EUR",
         rate=Decimal("0.92"),
         date=today,
     )
     rate2 = CurrencyRate(
-        from_currency_id=usd.id,
-        to_currency_id=cad.id,
+        from_currency_code="USD",
+        to_currency_code="CAD",
         rate=Decimal("1.35"),
         date=today,
     )

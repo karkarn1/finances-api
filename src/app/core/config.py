@@ -46,6 +46,7 @@ class Settings(BaseSettings):
 
     # CORS
     CORS_ORIGINS: list[str] = ["*"]
+    CORS_ORIGIN_REGEX: str | None = ".*"  # Allow all origins with credentials
     CORS_CREDENTIALS: bool = True
     CORS_METHODS: list[str] = ["*"]
     CORS_HEADERS: list[str] = ["*"]

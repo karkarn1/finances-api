@@ -68,7 +68,7 @@ app.state.limiter = limiter
 # Configure CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.CORS_ORIGINS,
+    allow_origin_regex=settings.CORS_ORIGIN_REGEX,
     allow_credentials=settings.CORS_CREDENTIALS,
     allow_methods=settings.CORS_METHODS,
     allow_headers=settings.CORS_HEADERS,

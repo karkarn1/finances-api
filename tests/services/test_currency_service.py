@@ -21,15 +21,15 @@ from app.services.currency_service import (
 async def test_currencies(test_db: AsyncSession) -> dict[str, Currency]:
     """Create test currencies for service testing."""
     currencies = [
-        Currency(code="USD", name="US Dollar", symbol="$", is_active=True),
-        Currency(code="EUR", name="Euro", symbol="€", is_active=True),
-        Currency(code="GBP", name="British Pound", symbol="£", is_active=True),
-        Currency(code="CAD", name="Canadian Dollar", symbol="C$", is_active=True),
+        Currency(code="USD", name="US Dollar", symbol="$"),
+        Currency(code="EUR", name="Euro", symbol="€"),
+        Currency(code="GBP", name="British Pound", symbol="£"),
+        Currency(code="CAD", name="Canadian Dollar", symbol="C$"),
     ]
     test_db.add_all(currencies)
     await test_db.commit()
 
-    # Refresh to get IDs
+    # Refresh to ensure they're loaded
     for curr in currencies:
         await test_db.refresh(curr)
 
@@ -223,15 +223,11 @@ async def test_get_exchange_rate_success(
     test_db: AsyncSession, test_currencies: dict[str, Currency]
 ) -> None:
     """Test getting exchange rate between two currencies."""
-    # Get currencies from fixture
-    usd = test_currencies["USD"]
-    eur = test_currencies["EUR"]
-
     # Create rate
     today = date.today()
     rate = CurrencyRate(
-        from_currency_id=usd.id,
-        to_currency_id=eur.id,
+        from_currency_code="USD",
+        to_currency_code="EUR",
         rate=Decimal("0.92"),
         date=today,
     )
@@ -272,15 +268,11 @@ async def test_sync_creates_bidirectional_rates(
     ):
         await sync_currency_rates(test_db, "USD")
 
-        # Get currencies from fixture
-        usd = test_currencies["USD"]
-        eur = test_currencies["EUR"]
-
         # Check USD -> EUR rate
         result = await test_db.execute(
             select(CurrencyRate).where(
-                CurrencyRate.from_currency_id == usd.id,
-                CurrencyRate.to_currency_id == eur.id,
+                CurrencyRate.from_currency_code == "USD",
+                CurrencyRate.to_currency_code == "EUR",
             )
         )
         usd_to_eur = result.scalar_one()
@@ -289,8 +281,8 @@ async def test_sync_creates_bidirectional_rates(
         # Check EUR -> USD rate (reverse)
         result = await test_db.execute(
             select(CurrencyRate).where(
-                CurrencyRate.from_currency_id == eur.id,
-                CurrencyRate.to_currency_id == usd.id,
+                CurrencyRate.from_currency_code == "EUR",
+                CurrencyRate.to_currency_code == "USD",
             )
         )
         eur_to_usd = result.scalar_one()

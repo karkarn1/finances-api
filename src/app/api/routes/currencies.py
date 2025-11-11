@@ -26,28 +26,21 @@ router = APIRouter()
 @router.get("/", response_model=list[CurrencyResponse])
 async def list_currencies(
     db: Annotated[AsyncSession, Depends(get_db)],
-    active_only: bool = Query(True, description="Only return active currencies"),
 ) -> list[Currency]:
     """List all currencies in the system.
 
     Args:
         db: Database session
-        active_only: Filter to only active currencies (default: True)
 
     Returns:
-        List of currencies
+        List of currencies ordered by code
 
     Example:
         GET /api/v1/currencies
-        GET /api/v1/currencies?active_only=false
     """
-    logger.info(f"Listing currencies (active_only={active_only})")
+    logger.info("Listing currencies")
 
-    query = select(Currency)
-    if active_only:
-        query = query.where(Currency.is_active == True)  # noqa: E712
-
-    query = query.order_by(Currency.code)
+    query = select(Currency).order_by(Currency.code)
 
     result = await db.execute(query)
     currencies = result.scalars().all()
@@ -137,7 +130,6 @@ async def create_currency(
         code=code_upper,
         name=currency_data.name,
         symbol=currency_data.symbol,
-        is_active=currency_data.is_active,
     )
 
     db.add(currency)
@@ -193,8 +185,6 @@ async def update_currency(
         currency.name = currency_data.name
     if currency_data.symbol is not None:
         currency.symbol = currency_data.symbol
-    if currency_data.is_active is not None:
-        currency.is_active = currency_data.is_active
 
     await db.commit()
     await db.refresh(currency)
@@ -241,14 +231,13 @@ async def get_currency_rates(
 
     # Get all rates from this currency
     result = await db.execute(
-        select(CurrencyRate, Currency)
-        .join(Currency, CurrencyRate.to_currency_id == Currency.id)
-        .where(CurrencyRate.from_currency_id == currency.id, CurrencyRate.date == rate_date)
+        select(CurrencyRate)
+        .where(CurrencyRate.from_currency_code == code_upper, CurrencyRate.date == rate_date)
     )
 
     rates_data = {}
-    for rate, to_currency in result:
-        rates_data[to_currency.code] = rate.rate
+    for rate in result.scalars():
+        rates_data[rate.to_currency_code] = rate.rate
 
     if not rates_data:
         raise HTTPException(
